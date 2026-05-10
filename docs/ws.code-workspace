@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../ws"
+		},
+		{
+			"path": "../hms-backend"
+		},
+		{
+			"path": "../hms-frontend"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
+}
