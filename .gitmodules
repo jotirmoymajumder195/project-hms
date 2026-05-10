@@ -1,0 +1,9 @@
+[submodule "hms-frontend"]
+	path = hms-frontend
+	url = https://github.com/jotirmoymajumder195/hms-frontend.git
+[submodule "hms-backend"]
+	path = hms-backend
+	url = https://github.com/jotirmoymajumder195/hms-backend.git
+[submodule "hms-docs"]
+	path = hms-docs
+	url = https://github.com/jotirmoymajumder195/hms-docs.git
