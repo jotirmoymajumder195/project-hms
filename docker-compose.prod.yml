@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./hms-backend
+      dockerfile: Dockerfile
+      target: runner
+    env_file:
+      - ./hms-backend/.env.prod
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "127.0.0.1:5000:5000"
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./hms-frontend
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: always
+    depends_on:
+      - backend
+
+volumes:
+  redis_data:
