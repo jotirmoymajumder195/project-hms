@@ -1,247 +1,396 @@
-# HMS Project — Code Review & Backlog
+# HMS Project — Backlog & Handoff Document
 
-> Review date: 2026-05-09
-> Project: MBS Hospital Management System (HMS)
-> Stack: Node.js/Express (backend) + Next.js 14/TypeScript (frontend) + PostgreSQL/Prisma
-
----
-
-## 🔴 Critical Issues
-
-### C1. No .env.example — Configuration is undocumented
-**Where:** `hms-backend/`
-**Problem:** The project reads ~20 env vars (`JWT_SECRET`, `ENCRYPTION_KEY`, `AWS_*`, `TWILIO_*`, `SMTP_*`, etc.) but has no `.env.example` file. New developers have no idea what variables to set. The app will silently fail or crash at runtime with cryptic errors when required vars are missing.
-**Fix:** Create `.env.example` with all variables, mark required vs optional, add startup validation that crashes with a clear message if required vars are missing.
-
-### C2. ENCRYPTION_KEY is not validated at startup
-**Where:** `hms-backend/src/utils/encryption.js:18`
-**Problem:** `process.env.ENCRYPTION_KEY || ''` silently produces a 0-byte key. AES-256-GCM will throw a cryptic `Invalid key length` error at encryption time (runtime). Patient Aadhaar data would be unencryptable.
-**Fix:** Validate at startup that `ENCRYPTION_KEY` is a 64-char hex string (32 bytes). Crash immediately if missing or malformed.
-
-### C3. JWT_SECRET not validated at startup
-**Where:** `hms-backend/src/config/index.js:13`
-**Problem:** If `JWT_SECRET` is unset, `jsonwebtoken` uses `undefined` as the secret — all tokens become trivially forgeable. There is no crash or warning at startup.
-**Fix:** Validate at startup. Crash if `JWT_SECRET` is missing.
-
-### C4. Zero test coverage across the entire project
-**Where:** `hms-backend/`, `hms-frontend/`
-**Problem:** 0 test files found. No unit, integration, or E2E tests. Critical business logic (appointment booking, billing, check-in transaction) has zero automated verification.
-**Fix:** Start with integration tests for Prisma operations (check-in transaction), then API endpoint tests, then frontend component tests.
-
-### C5. ID generators have race conditions
-**Where:** `hms-backend/src/utils/idGenerators.js` (all 5 functions)
-**Problem:** Read-then-write pattern in separate queries — two concurrent requests can read the same `lastNum` and generate duplicate IDs (UHID, bill numbers, etc.). In a busy hospital, this WILL happen.
-**Fix:** Use a database sequence (PostgreSQL `SERIAL`/`IDENTITY`) or wrap in a Prisma `$transaction` with proper locking (`SELECT ... FOR UPDATE`).
-
-### C6. Check-in transaction has no compensation/rollback for downstream failures
-**Where:** `hms-backend/src/modules/appointment/checkin.helper.js`
-**Problem:** The check-in creates OPDVisit → Bill → Payment in a transaction, but if the HTTP response fails to send (network issue after DB commit), the patient is checked in but the frontend shows an error. No idempotency key or saga pattern.
-**Fix:** Add idempotency key support or a reconciliation endpoint.
+> Last updated: 2026-05-22
+> Branch: `joti` (all active work here; `master` = last stable deploy)
+> Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
 ---
 
-## 🟠 High Priority
+## Quick-start for AI agents
 
-### H1. Backend lacks service/controller layer — all logic in route files
-**Where:** All `*.routes.js` files
-**Problem:** Route files contain request handling, business logic, DB queries, and response formatting all in one function. Single files are 500-835 lines (appointment: 835, auth: 573, opd-chambers: 602). No separation of concerns, impossible to unit test.
-**Fix:** Split into `routes/` → `controllers/` → `services/` → `repositories/`. Business logic in services, DB queries in repositories.
+```
+Working dirs:
+  Backend:  hms-backend/          (Node/Express/Prisma — all .js)
+  Frontend: hms-frontend/src/     (Next.js 14 App Router, TypeScript)
+  Schema:   hms-backend/prisma/schema.prisma
 
-### H2. Backend is plain JavaScript — no TypeScript
-**Where:** `hms-backend/src/` (all .js files)
-**Problem:** Runtime errors from undefined properties, no type safety for Prisma queries, no IDE autocompletion for request/response shapes. Frontend is TypeScript but backend is not.
-**Fix:** Migrate backend to TypeScript incrementally (start with shared types, then services).
+Apply schema changes (shadow DB incompatible with Docker):
+  docker exec project-hms-backend-1 npx prisma db push --schema /app/prisma/schema.prisma --accept-data-loss
 
-### H3. No Docker/deployment configuration
-**Where:** Project root
-**Problem:** No `Dockerfile`, `docker-compose.yml`, or deployment scripts. The project requires Node.js, PostgreSQL 15, and Redis 7 — all must be manually installed and configured.
-**Fix:** Add `docker-compose.yml` with backend, frontend, PostgreSQL, and Redis services. Add `Dockerfile` for both apps.
+Restart backend after any schema push or route file changes:
+  docker restart project-hms-backend-1
+```
 
-### H4. DISPLAY role receives 365-day JWT (security concern)
-**Where:** `hms-backend/src/modules/auth/auth.routes.js` and `hms-frontend/src/lib/auth-context.tsx:70`
-**Problem:** DISPLAY accounts get a 365-day token with no way to revoke it server-side (no JWT blacklist). If a token is stolen, it's valid for a year. Frontend sets `expires: 1` via cookie, but backend issue remains.
-**Fix:** Add a JWT blacklist/revocation mechanism using Redis. Reduce max token lifetime. Or implement refresh token rotation.
-
-### H5. 5 out of 14 backend modules are non-functional stubs
-**Where:** `hms-backend/src/modules/inventory/`, `ipd/`, `lab/`, `pharmacy/`, `notifications/`
-**Problem:** Return `"Module active — full build coming next session"`. The Prisma schema has full models for all these, so schema is ahead of implementation. This creates confusing 404s and dead frontend links.
-**Fix:** Either implement the modules or remove the stub routes (return 404 properly). Also remove or label corresponding frontend sidebar links.
-
-### H6. Two duplicate CheckInModal components
-**Where:** `hms-frontend/src/components/layout/CheckInModal.tsx` (323 lines) and `hms-frontend/src/components/CheckInModal.tsx` (285 lines)
-**Problem:** Two different versions of essentially the same modal. Creates maintenance burden — fixes in one won't apply to the other. Likely one is mobile-optimized and the other desktop.
-**Fix:** Merge into a single responsive component with consistent behavior.
-
-### H7. Uploaded prescription files have no cleanup mechanism
-**Where:** `hms-backend/src/modules/opd/opd.routes.js` (prescription-upload endpoint)
-**Problem:** Files uploaded via multer go to `uploads/prescriptions/` but there's no cleanup job, no TTL, no S3 lifecycle policy. Disk will fill up over time.
-**Fix:** Add S3 upload (already configured in AWS config), or add a scheduled cleanup job, or configure multer to use S3 directly.
-
-### H8. /doctor/next endpoint makes 10+ sequential DB queries
-**Where:** `hms-backend/src/modules/appointment/appointment.routes.js:592-748`
-**Problem:** The "Next Patient" flow sequentially queries: DoctorQueue lookup → update current visit → fetch linked visit → update appointment → loop fetch candidates → update skipped token → fallback query → upsert queue → update appointment → log audit. At high throughput, this will block the event loop and cause slow responses.
-**Fix:** Batch queries using Prisma `$transaction`, use findMany with `skip` instead of loop, reduce round-trips.
-
-### H9. No database health check in /health endpoint
-**Where:** `hms-backend/src/server.js:128-149`
-**Problem:** The health endpoint returns "OK" even when PostgreSQL or Redis is down. Load balancers/routers won't detect backend degradation.
-**Fix:** Add Prisma `$queryRaw` and Redis `PING` checks to the health endpoint.
+**Critical conventions — read before touching anything:**
+1. Every Prisma query MUST include `tenantId: req.tenantId` — no exceptions.
+2. Use `prisma.*.findFirst({ where: { id, tenantId } })` not `findUnique` for tenant-scoped lookups.
+3. Never commit or push without explicit user instruction.
+4. `api.ts` is the single source of truth for frontend API calls — add all new endpoints there.
+5. The `useAuth()` hook returns `{ isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent }`.
 
 ---
 
-## 🟡 Medium Priority
+## Project Architecture
 
-### M1. Audit helper silently swallows all errors
-**Where:** `hms-backend/src/utils/auditHelper.js:36-39`
-**Problem:** If the audit log write fails (DB down, schema mismatch), the error is logged but the main operation continues. This is correct in principle (audit should never crash the app), but there's no alerting or fallback (e.g., write to a local file).
-**Fix:** Add Winston file transport as fallback when DB audit fails. Add alerting threshold for audit failure rate.
+```
+Project-hms/                   ← git root (submodule coordinator)
+  hms-backend/                 ← git submodule, branch: joti
+  hms-frontend/                ← git submodule, branch: joti
+  hms-docs/                    ← git submodule, branch: main
+  UAT/                         ← UAT .docx documents (tracked in root)
+  backlog.md                   ← THIS FILE
+```
 
-### M2. Settings page is 1393 lines — should be split into separate files
-**Where:** `hms-frontend/src/app/settings/page.tsx`
-**Problem:** A single file contains 5 sub-components (SettingsPage, StaffTab, StaffModal, ConsumablesTab, ConsumableModal, OPDChambersTab, ChamberModal, ChangePasswordTab). Impossible to navigate, review, or test.
-**Fix:** Split into `settings/staff-tab.tsx`, `settings/consumables-tab.tsx`, `settings/chambers-tab.tsx`, etc.
+**Backend structure:**
+```
+hms-backend/src/
+  middleware/auth.js            ← authenticate + authorize(ROLES...) + ROLES constants
+  modules/
+    auth/         auth.routes.js
+    appointment/  appointment.routes.js, checkin.helper.js
+    billing/      billing.routes.js
+    consumables/  consumables.routes.js
+    doctor/       doctor.routes.js
+    emergency/    emergency.routes.js
+    ipd/          ipd.routes.js          ← largest file, ~1200 lines
+    nurse/        nurse.routes.js
+    opd/          opd.routes.js
+    patient/      patient.routes.js
+    reports/      reports.routes.js
+    settings/     settings.routes.js
+  prisma.js                     ← singleton PrismaClient
+  server.js                     ← Express app + route registration
+```
 
-### M3. Settings page uses raw axios instead of the API client
-**Where:** `hms-frontend/src/app/settings/page.tsx:45` and throughout
-**Problem:** Settings page creates its own `API` constant (`'http://localhost:5000/api/v1'`) and manually attaches tokens via `getToken()`, bypassing the shared `api.ts` Axios instance that handles 401 redirects, base URL, and headers.
-**Fix:** Use the imported `api` instance from `@/lib/api` consistently.
-
-### M4. Hardcoded fallback IP addresses
-**Where:** 
-- `hms-frontend/next.config.js:4` — `http://13.206.144.153/api/v1`
-- `hms-frontend/src/lib/api.ts:12` — `http://13.206.144.153/api/v1`
-- `hms-frontend/src/app/settings/page.tsx:45` — `http://localhost:5000/api/v1`
-**Problem:** Three different fallback URLs, one pointing to a specific production IP. This is a security concern (production URL in code) and causes confusion between environments.
-**Fix:** Use a single source of truth. Remove production IP from code. Use `.env.local` for all environment-specific values.
-
-### M5. Silent catch blocks throughout backend
-**Where:** Multiple files including `appointment.routes.js` lines 619-631, 816
-**Problem:** `.catch(() => {})` patterns swallow errors silently. If the DB update fails after advancing the queue, the system state becomes inconsistent with no trace.
-**Fix:** Log all caught errors at minimum. Implement compensation actions for failed secondary operations.
-
-### M6. No loading/error/empty states on many pages
-**Where:** Multiple frontend pages
-**Problem:** Several pages don't show loading skeletons, error banners, or empty states when data is being fetched or unavailable. This creates a poor UX (blank screens, no feedback on failures).
-**Fix:** Add consistent loading, error, and empty state handling across all pages. Use Suspense boundaries.
-
-### M7. Token board polls every 3 seconds without backoff
-**Where:** `hms-frontend/src/app/token-board/page.tsx`
-**Problem:** The token board polls `/appointments/token-board` every 3 seconds. If the API fails (network issue, server restart), it continues poll-spamming at 3s intervals with no backoff.
-**Fix:** Implement exponential backoff (3s → 6s → 12s → max 30s) on error. Reset interval on success.
-
-### M8. Login form has no CAPTCHA or CSRF protection
-**Where:** `hms-frontend/src/app/login/page.tsx`
-**Problem:** While rate limiting exists server-side (5 req/15min), there's no CAPTCHA on the login form. Automated brute-force tools can hit the login endpoint until the IP is blocked.
-**Fix:** Add Google reCAPTCHA v3 (invisible) or Cloudflare Turnstile on login.
-
-### M9. No exclusive PrismaClient instance (new instance per module)
-**Where:** `hms-backend/src/modules/*/` — each route file creates `new PrismaClient()`
-**Problem:** Prisma recommends using a single global instance. Multiple instances create unnecessary connection pool overhead and can hit database connection limits.
-**Fix:** Create a single PrismaClient singleton in `config/` and import it everywhere.
-
-### M10. Frontend API client doesn't include OPD chambers, consumables, audit endpoints
-**Where:** `hms-frontend/src/lib/api.ts`
-**Problem:** The `opdChamberApi`, consumables, audit, and settings endpoints are called via raw `axios.get` in the settings page instead of being added to the shared API client. Inconsistent pattern.
-**Fix:** Add all missing API endpoints to `api.ts`.
-
----
-
-## 🟢 Low Priority
-
-### L1. No request size validation for JSON body
-**Where:** `hms-backend/src/server.js:107` — `limit: '10mb'`
-**Problem:** 10MB JSON body parsing is excessive for an API that primarily sends small payloads. This is a DoS attack vector.
-**Fix:** Reduce to 1-2MB. Use a separate larger limit only on the prescription upload endpoint.
-
-### L2. Inefficient summary computation in /appointments/today
-**Where:** `hms-backend/src/modules/appointment/appointment.routes.js:337-343`
-**Problem:** Summary counts are computed by loading ALL appointments into memory and filtering in JS. For a busy hospital with 500+ appointments/day, this wastes memory and CPU.
-**Fix:** Use Prisma aggregation (`_count` with `status` grouping) or separate count queries.
-
-### L3. Prisma enum mismatch with appointment status flow
-**Where:** `hms-backend/prisma/schema.prisma` AppointmentStatus enum
-**Problem:** The appointment status flow (SCHEDULED → CHECKED_IN → IN_CONSULTATION → COMPLETED) is enforced by business logic, not by the database. There's nothing preventing a direct jump from SCHEDULED to COMPLETED.
-**Fix:** Add a state machine validation in a service layer. Alternatively, use a Prisma `@database` enum with PostgreSQL enum type.
-
-### L4. Next.js config exports production IP in client bundle
-**Where:** `hms-frontend/next.config.js`
-**Problem:** `NEXT_PUBLIC_API_URL` is embedded in the client-side JS bundle at build time. Even if set via env vars, the fallback production IP is visible to anyone who inspects the JS source.
-**Fix:** Use `NEXT_PUBLIC_API_URL` exclusively via runtime env vars, not hardcoded in config.
-
-### L5. No consistent error response shape
-**Where:** All backend route files
-**Problem:** Most responses use `{ success: true, ... }`, but some use different shapes or non-standard error formats. The error handler returns `{ success: false, message: "..." }` but some routes use `{ errors: [...] }`.
-**Fix:** Standardize all API responses to `{ success: boolean, data?: any, message?: string, errors?: [...] }`.
-
-### L6. Multiple Prisma schema types not yet used by any module
-**Where:** Prisma schema models for Lab, Pharmacy, Inventory, IPD, Notifications
-**Problem:** These models are well-designed but completely unused — no backend routes consume them. Schema is "ahead" of implementation.
-**Fix:** Either implement the modules or add a validation layer. Consider removing unused models until implementation is ready.
-
-### L7. Empty `uploads/prescriptions/` directory committed to git
-**Where:** `uploads/prescriptions/`
-**Problem:** Empty directory tracked in version control, presumably with a `.gitkeep`. Should be in `.gitignore` with a proper runtime initialization.
-**Fix:** Add to `.gitignore`. Create directory at app startup if it doesn't exist.
-
-### L8. No frontend error boundary
-**Where:** Root layout `hms-frontend/src/app/layout.tsx`
-**Problem:** No React error boundary wraps the app. A render crash in any page/component will show a white screen or Next.js default error page.
-**Fix:** Add a custom ErrorBoundary component with user-friendly fallback UI.
-
-### L9. No meta tags or SEO
-**Where:** `hms-frontend/src/app/layout.tsx`
-**Problem:** Root layout has minimal metadata. No description, OG tags, favicon configuration.
-**Fix:** Add proper metadata export with Next.js 14 Metadata API.
-
-### L10. 401 interceptor has no guard against login page redirect loop
-**Where:** `hms-frontend/src/lib/api.ts:27-33`
-**Problem:** If the login page itself triggers a 401 (e.g., expired token check), the interceptor redirects to `/login`, causing an infinite loop.
-**Fix:** Check `window.location.pathname !== '/login'` before redirecting.
+**Frontend structure:**
+```
+hms-frontend/src/
+  app/
+    billing/        page.tsx, new/page.tsx, invoice/[id]/page.tsx
+    dashboard/      page.tsx
+    ipd/
+      page.tsx                   ← IPD list
+      [admissionId]/page.tsx     ← IPD detail (largest page, ~1100 lines)
+      beds/page.tsx              ← Bed grid
+      new/page.tsx               ← New admission form
+      discharge-summary/[id]/    ← Discharge summary print view
+    nurse/          page.tsx
+    patients/       page.tsx, [id]/page.tsx, new/page.tsx
+    settings/       page.tsx
+    ...
+  components/layout/
+    AppLayout.tsx   ← route guard + layout wrapper
+    Sidebar.tsx     ← nav items with role filtering
+  lib/
+    api.ts          ← ALL api calls (billingApi, ipdApi, patientApi, etc.)
+    auth-context.tsx ← useAuth() hook
+```
 
 ---
 
-## 📋 Suggested Project Board
+## Module Status
 
-### Sprint 1 — Foundation & Safety
-- [ ] C1: Create `.env.example` + startup config validation
-- [ ] C2: Validate `ENCRYPTION_KEY` at startup
-- [ ] C3: Validate `JWT_SECRET` at startup
-- [ ] C5: Fix ID generator race conditions
-- [ ] C6: Add idempotency to check-in transactions
-- [ ] M9: Singleton PrismaClient
+### ✅ Phase 0 — Multi-Tenant Architecture (deployed to master)
+Full tenant isolation on all 38 Prisma models. employeeId login. CASHIER, OPD_NURSE, SUPER_ADMIN roles.
 
-### Sprint 2 — Testing & Quality
-- [ ] C4: Set up test framework (Jest + Supertest for API, Testing Library for frontend)
-- [ ] H1: Refactor first module to service/controller pattern
-- [ ] M5: Fix silent catch blocks
-- [ ] M6: Add loading/error/empty states
+### ✅ Phase 1 — Emergency Module (deployed to joti)
+Emergency bill creation, modification workflow, admission-from-emergency. CASHIER role fully built.
 
-### Sprint 3 — Deployment
-- [ ] H3: Docker + docker-compose setup
-- [ ] H7: Fix prescription upload (S3 or cleanup)
-- [ ] H9: Database health checks
-- [ ] L1: Reduce body size limit
+### ✅ Phase 2 — IPD Module (joti branch, NOT yet in master)
+Full IPD module built and UAT tested through 5 rounds. See detailed status below.
 
-### Sprint 4 — Security Hardening
-- [ ] H4: JWT revocation + limit DISPLAY token lifetime
-- [ ] H6: Merge duplicate CheckInModals
-- [ ] M8: CAPTCHA on login
-- [ ] M4: Remove hardcoded production URL
+### ⏳ Phase 3 — Docker & CI/CD (not started)
+Needs: Dockerfile (backend + frontend), GitHub Actions CI, production deploy scripts.
 
-### Sprint 5 — Architecture
-- [ ] H2: Migrate backend to TypeScript
-- [ ] H5: Implement or remove stub modules
-- [ ] M2: Split settings page
-- [ ] M3: Use shared API client consistently
-- [ ] M10: Complete API client coverage
-
-### Sprint 6 — Performance & Polish
-- [ ] H8: Optimize /doctor/next query pattern
-- [ ] M7: Token board exponential backoff
-- [ ] L2: Inefficient summary computation
-- [ ] L3: State machine validation
-- [ ] L8-L10: Error boundaries, SEO, redirect loop fix
+### ⏳ Phase 4 — Code Quality (not started)
+See code review section at the bottom.
 
 ---
 
-*Generated from full codebase review. Backend: 26 JS files (~4,845 LOC). Frontend: 59 TS/TSX files. Prisma schema: 1001 lines, 24 models + 15 enums.*
+## IPD Module — Current State (as of 2026-05-22)
+
+### Schema additions (applied via `prisma db push`)
+```prisma
+// New models
+IPDCharge       ipd_charges        — charges during stay (BED_CHARGE/PROCEDURE/MEDICINE/etc.)
+IPDPayment      ipd_payments       — CASHIER-only payment collection (ADVANCE/INTERIM/FINAL)
+IPDWardChange   ipd_ward_changes   — bed/ward transfer history
+VitalRecord     vital_records      — BP, pulse, temperature, SPO2, weight
+NurseNote       nurse_notes        — categorized nursing notes
+NurseDepartment nurse_departments  — ICU, Gen Ward, NICU, etc.
+NurseDutyAssignment nurse_duty_assignments — nurse → dept per shift
+
+// Modified models
+Ward              — added dailyRate Decimal?
+IPDAdmission      — added lastAccruedDate, dischargeRequestedAt/By, insuranceDetails (JSON),
+                     specialDoctorVisit String?
+Bill              — renamed admissionId → ipdAdmissionId
+```
+
+### Backend API (`/api/v1/ipd`)
+All endpoints implemented in `hms-backend/src/modules/ipd/ipd.routes.js`:
+
+| Endpoint | Method | Roles |
+|---|---|---|
+| /wards | GET | ADMIN, RECEPTION, DOCTOR, NURSE, NURSE_SUP |
+| /wards/:id/beds | GET | ADMIN, RECEPTION, DOCTOR, NURSE, NURSE_SUP |
+| /beds | POST | ADMIN, SUPER_ADMIN |
+| /admissions | POST | ADMIN, RECEPTION, DOCTOR |
+| /admissions | GET | ALL (doctors see own, nurses see assigned dept) |
+| /admissions/:id | GET | ALL |
+| /admissions/:id | PATCH | ADMIN, SUPER_ADMIN, DOCTOR, RECEPTION |
+| /admissions/:id/ward-change | POST | ADMIN, RECEPTION |
+| /admissions/:id/transfer | POST | ADMIN, RECEPTION |
+| /admissions/:id/discharge | PATCH | ADMIN, SUPER_ADMIN, DOCTOR |
+| /admissions/:id/discharge/confirm | POST | ADMIN, SUPER_ADMIN, CASHIER |
+| /admissions/:id/bill-summary | GET | ALL |
+| /admissions/:id/charges | POST | ADMIN, NURSE, NURSE_SUP, CASHIER |
+| /admissions/:id/charges/:chargeId | DELETE | ADMIN, DOCTOR, NURSE |
+| /admissions/:id/payments | GET/POST | CASHIER, ADMIN |
+| /admissions/:id/vitals | GET/POST | DOCTOR, NURSE, NURSE_SUP, ADMIN |
+| /admissions/:id/notes | GET/POST | DOCTOR, NURSE, NURSE_SUP, ADMIN |
+| /admissions/:id/prescriptions | GET/POST | DOCTOR, ADMIN |
+| /departments | GET/POST/PATCH | ADMIN, NURSE_SUP |
+| /duty-assignments | GET/POST | ADMIN, NURSE_SUP |
+
+Also `/api/v1/billing/ipd` — active admissions list for billing page.
+And `/api/v1/billing/balance` — cumulative outstanding balance (all-time).
+
+### Frontend pages
+- `/ipd` — Admission list with status filter + pagination
+- `/ipd/new` — New admission form (patient search + bed selection)
+- `/ipd/[admissionId]` — Detail page with role-branched tabs (see tab matrix below)
+- `/ipd/beds` — Bed availability grid
+- `/ipd/discharge-summary/[admissionId]` — Printable discharge summary
+
+### Role-based tab matrix (IPD admission detail)
+| Role | Tabs shown |
+|---|---|
+| Nurse / Nurse Superintendent / Doctor | Overview, Vitals and Notes |
+| Cashier | Overview & Bill, Payments |
+| Admin / Reception | Overview & Bill, Vitals, Nurse Notes, Prescriptions, Payments |
+
+### Bed charge accrual logic
+- Lazy (no cron) — runs when `GET /admissions/:id/bill-summary` is called
+- When status = ADMITTED: auto-posts charges for fully elapsed calendar days; live estimate shown for current partial day
+- When doctor initiates discharge: `accrueCurrentBedCharge(admission, now)` is called BEFORE setting status to DISCHARGE_PENDING — this freezes the bed charges
+- When status = DISCHARGE_PENDING or DISCHARGED: no further accrual or live estimate
+- Function: `accrueCurrentBedCharge(admission, until)` in `ipd.routes.js` lines 27–68
+
+### IPD payment → Bill status sync
+When `POST /admissions/:id/payments` is called:
+1. Creates IPDPayment record
+2. Aggregates all IPD payments for this admission
+3. Finds the linked non-TRANSFERRED Bill (via `bill.ipdAdmissionId`)
+4. Updates Bill.paidAmount, balanceAmount, paymentStatus accordingly
+
+### Patient/doctor routing
+- `/my-patients` (DOCTOR) — queries both OPDVisit and IPDAdmission (admitting + attending doctor)
+- `/ipd/admissions?patientId=<uuid>` — returns ALL statuses when patientId provided (no active-only filter)
+
+---
+
+## UAT Session History
+
+### UAT 4 — Issues fixed (all done)
+| ID | Issue | Fix location |
+|---|---|---|
+| A1 | Nurse dashboard: remove "Today's Duties" card | `nurse/page.tsx` |
+| A2 | Nurse add charge: catalog price auto-resolution | `ipd/[admissionId]/page.tsx` |
+| A3 | Doctor simplified view (Overview + Vitals and Notes) | `ipd/[admissionId]/page.tsx` |
+| A4 | Nurse simplified view same | `ipd/[admissionId]/page.tsx` |
+| B1 | 3-step emergency admission: checkbox→Yes/No→inline form | `billing/new/page.tsx` |
+| B2 | Emergency doctor filter: isIPD (not isEmergency) | `billing/new/page.tsx` |
+| B3 | Doctor dropdown hidden when admissionRecommended = false | `billing/new/page.tsx` |
+| B5 | Reception can assign attending doctor | `ipd.routes.js` PATCH, `ipd/[admissionId]/page.tsx` |
+| B6 | Special doctor visit field on admission | Schema: `specialDoctorVisit String?`, frontend edit UI |
+| C1-C3 | Role-branched tabs in IPD detail | `ipd/[admissionId]/page.tsx` |
+| C4 | Doctor can't see Appointments in sidebar | `Sidebar.tsx` |
+| C5 | Doctor "My Patients" page | `patients/page.tsx`, `patient.routes.js` |
+| C6 | Doctor-specific dashboard | `dashboard/page.tsx` |
+| D1 | TRANSFERRED bill double-counting fix in bill summary | `ipd.routes.js` |
+| D2 | "Today's Bills" heading on billing page | `billing/page.tsx` |
+| E1 | Consumables multi-tenant bug (missing tenantId) | `consumables.routes.js` |
+
+### UAT 5 — Issues fixed (all done, committed 2026-05-22)
+| ID | Issue | Fix location |
+|---|---|---|
+| 1 | Doctor My Patients shows 0 | `patient.routes.js` — IPD admissions + tenantId fix |
+| 2 | Cashier sees Bed Grid button | `ipd/page.tsx` — hidden for isCashier |
+| 3 | Cashier sees Vitals/Nurse Notes tabs | `ipd/[admissionId]/page.tsx` — cashier tab branch |
+| 4 | Patient profile IPD tab misses discharged admissions | `ipd.routes.js` patientId param, `patients/[id]/page.tsx` |
+| 5 | Balance Due stat date-filtered (should be cumulative) | `billing.routes.js` GET /balance, `billing/page.tsx` |
+| 6 | Add Charge: all types used catalog; OTHER/PROCEDURE should be free text | `ipd/[admissionId]/page.tsx` |
+| 7 | IPD payment doesn't update Bill.paymentStatus | `ipd.routes.js` POST payments — syncs linked Bill |
+| 8 | Bed accrual continues after discharge initiation | `ipd.routes.js` — freeze on PATCH /discharge |
+
+---
+
+## Remaining / Deferred Items
+
+### B4 — Upload paper prescription to S3 (in scope, pending credentials)
+**What:** Nurse/doctor should be able to upload a paper prescription photo during IPD stay.
+**Where:** Backend: `POST /ipd/admissions/:id/prescriptions/upload` (new endpoint needed). Frontend: add upload button in the prescriptions section of the IPD detail page.
+**Pattern:** Follow the existing OPD prescription upload in `hms-backend/src/modules/opd/opd.routes.js` (multer + S3 with `@aws-sdk/client-s3`). AWS credentials go in `.env` as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_BUCKET`.
+**Note:** The OPD prescription upload at `/opd/visits/:id/prescription-upload` stores to `uploads/prescriptions/` locally (needs S3). Reuse that pattern but for IPD admissions.
+
+### A5 — Show prescription medicine names inline (partially done)
+**What:** In the IPD overview tab (for nurses and doctors), show prescription medicines as inline badges. This is already partially in the code — prescriptions are fetched on mount and shown in the overview. Verify it's working in UAT.
+
+### Discharge summary print view
+**What:** `/ipd/discharge-summary/[admissionId]` page was added in the latest frontend commit. Needs:
+- Verify layout is print-friendly (CSS `@media print`)
+- Include: patient info, admission dates, attending doctor, diagnosis, discharge notes, discharge condition, charges summary, payments summary
+- May need a dedicated backend endpoint or use the existing bill-summary data
+
+### IPD admin configuration
+**What:** Settings page needs an "IPD Config" tab for admin to manage:
+- Wards (add/edit name, total beds, dailyRate)
+- Departments (add/edit for nurse duty assignments)
+Currently ward/bed management is only via API (no UI).
+
+### Nurse duty assignment UI
+**What:** Nurse Superintendent needs a UI to assign nurses to departments per shift. Backend endpoints exist at `GET/POST /ipd/duty-assignments` and `GET/POST /ipd/departments`. Need a frontend page at `/nurse-superintendent` or inside settings.
+
+### IPD module not yet in master
+The IPD module schema was pushed to the production DB (`prisma db push --accept-data-loss`) but the code is on the `joti` branch. When ready to deploy: merge `joti` → `master` and restart Docker containers.
+
+---
+
+## Known Bugs / Edge Cases to Watch
+
+### IPD bill totalAmount vs actual charges
+The linked Bill record (created at admission from emergency conversion) has a `totalAmount` set at creation time. As IPD charges accrue, the actual total diverges from `Bill.totalAmount`. The IPD bill summary correctly uses `ipdChargesTotal + linkedBillsTotal` for display, but the `Bill` record's `totalAmount` is stale. This is OK for now but will be confusing at final discharge.
+
+**Future fix:** When cashier confirms discharge, update `Bill.totalAmount` to the final computed total before updating paymentStatus.
+
+### NURSE_SUPERINTENDENT role
+The `isNurseSuperintendent` check exists in frontend but the backend `ROLES.NURSE_SUPERINTENDENT` might not be consistently applied across all nurse-related endpoints. Verify during next UAT round.
+
+### Prescriptions tab in simple view
+Nurses/doctors use the `vitals_notes` combined tab. Prescriptions are shown inline in the overview for these roles. Doctors can write prescriptions from the overview. No separate "Prescriptions" tab for nurses (by design).
+
+---
+
+## Technical Patterns Reference
+
+### Authentication / Authorization
+```javascript
+// Backend
+router.use(authenticate)  // attaches req.user, req.tenantId
+authorize(ROLES.ADMIN, ROLES.RECEPTION)  // 403 if role not in list
+
+// Frontend
+const { isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent } = useAuth()
+```
+
+### Tenant-scoped Prisma queries (MANDATORY)
+```javascript
+// Always include tenantId in where clause
+const record = await prisma.someModel.findFirst({
+  where: { id: req.params.id, tenantId: req.tenantId }
+})
+
+// For creates
+await prisma.someModel.create({ data: { tenantId: req.tenantId, ...rest } })
+
+// For updates: use findFirst (not findUnique) + tenantId
+const existing = await prisma.someModel.findFirst({ where: { id, tenantId: req.tenantId } })
+if (!existing) throw new AppError('Not found', 404)
+```
+
+### Schema changes
+```bash
+# Do NOT use prisma migrate dev (shadow DB fails in Docker)
+docker exec project-hms-backend-1 npx prisma db push \
+  --schema /app/prisma/schema.prisma --accept-data-loss
+
+# Then restart backend
+docker restart project-hms-backend-1
+```
+
+### Adding a new API endpoint (frontend)
+Always add to `hms-frontend/src/lib/api.ts`:
+```typescript
+export const myApi = {
+  list: (params?: { foo?: string }) => api.get('/my-route', { params }),
+  get: (id: string) => api.get(`/my-route/${id}`),
+  create: (data: any) => api.post('/my-route', data),
+  update: (id: string, data: any) => api.patch(`/my-route/${id}`, data),
+}
+```
+
+### Role-conditional rendering pattern
+```typescript
+const { isDoctor, isNurse, isNurseSuperintendent, isCashier, isAdmin } = useAuth()
+const isSimpleView = isNurse || isNurseSuperintendent || isDoctor
+const showBilling = !isNurse && !isNurseSuperintendent && !isDoctor
+```
+
+### Error handling (backend)
+```javascript
+// Use AppError for expected errors
+throw new AppError('Descriptive message', 404)
+
+// All route handlers are auto-wrapped — errors propagate to global handler
+// Do NOT catch internally unless you need fallback behavior
+```
+
+### Audit logging
+```javascript
+await logAudit({
+  userId: req.user.id,
+  tenantId: req.tenantId,
+  action: 'CREATE' | 'UPDATE' | 'DELETE',
+  resource: 'ModelName',
+  resourceId: record.id,
+  details: { /* any extra context */ },
+})
+```
+
+---
+
+## Code Review Debt (original items from 2026-05-09 review)
+
+### Critical (unresolved)
+- **C1** No `.env.example` — new devs can't configure the app
+- **C4** Zero test coverage
+- **C5** ID generators have race conditions (UHID, bill numbers)
+
+### High Priority (unresolved)
+- **H1** All business logic in route files — no service layer
+- **H2** Backend is plain JS (no TypeScript)
+- **H3** No Docker Compose — wait, this IS now resolved (Docker Compose exists)
+- **H4** DISPLAY role has 365-day JWT with no revocation
+- **H6** Two duplicate CheckInModal components
+
+### Medium Priority (unresolved)
+- **M2** Settings page is 1393 lines — needs splitting
+- **M3** Settings page uses raw axios instead of shared api.ts
+- **M7** Token board polls every 3s with no backoff
+
+### Items already resolved
+- ✅ **M9** Singleton PrismaClient (now in `src/prisma.js`)
+- ✅ **M4** Hardcoded production IP (partially fixed via env vars)
+- ✅ **H5** Stub modules — IPD is now implemented; lab/pharmacy still stubs
+
+---
+
+## IPD Module Files Reference
+
+| File | What it does |
+|---|---|
+| `hms-backend/src/modules/ipd/ipd.routes.js` | All IPD backend routes (~1200 lines) |
+| `hms-backend/src/modules/billing/billing.routes.js` | Billing including `/billing/balance` + `/billing/ipd` |
+| `hms-backend/src/modules/patient/patient.routes.js` | Patient routes including `/my-patients` (IPD-aware) |
+| `hms-backend/src/modules/consumables/consumables.routes.js` | Consumables catalog (multi-tenant fixed) |
+| `hms-backend/prisma/schema.prisma` | Full schema including all IPD models |
+| `hms-frontend/src/app/ipd/[admissionId]/page.tsx` | IPD detail — all tabs, modals (~1100 lines) |
+| `hms-frontend/src/app/ipd/page.tsx` | IPD list page |
+| `hms-frontend/src/app/ipd/new/page.tsx` | New admission form |
+| `hms-frontend/src/app/billing/page.tsx` | Billing list + IPD billing tab |
+| `hms-frontend/src/app/billing/new/page.tsx` | Create bill (including emergency→IPD flow) |
+| `hms-frontend/src/app/dashboard/page.tsx` | Doctor dashboard (IPD + OPD stats) |
+| `hms-frontend/src/app/patients/[id]/page.tsx` | Patient profile with IPD tab (all admissions) |
+| `hms-frontend/src/lib/api.ts` | All frontend API clients |
+| `hms-frontend/src/lib/auth-context.tsx` | useAuth() hook with all role flags |
