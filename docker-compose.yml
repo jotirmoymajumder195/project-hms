@@ -38,6 +38,7 @@ services:
       - ./hms-backend/src:/app/src
       - ./hms-backend/prisma:/app/prisma
       - backend_modules:/app/node_modules
+      - ./uploads:/uploads
     env_file:
       - ./hms-backend/.env
     environment:

@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-05-22
+> Last updated: 2026-05-23
 > Branch: `joti` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -211,6 +211,56 @@ When `POST /admissions/:id/payments` is called:
 | D1 | TRANSFERRED bill double-counting fix in bill summary | `ipd.routes.js` |
 | D2 | "Today's Bills" heading on billing page | `billing/page.tsx` |
 | E1 | Consumables multi-tenant bug (missing tenantId) | `consumables.routes.js` |
+
+### UAT 6 — Issues fixed (all done, 2026-05-23)
+
+#### UAT 6 Feature Issues
+
+| ID | Issue | Fix location |
+|---|---|---|
+| 4a | Emergency doctor auto-populates "Attending doctor" in IPD Admission Details form | `billing/new/page.tsx` — useEffect watches `selectedDoctor` when `billType = 'EMERGENCY'` and writes to `emergencyIpdForm.admittingDoctorId` |
+| 2 | MEDICINE item type in bill items now shows medicines catalog dropdown (same as CONSUMABLE) | `billing/new/page.tsx` — extended `onFocus`, ChevronDown trigger, and dropdown render condition to include `itemType === 'MEDICINE'`; `addMedicineToItem` no longer overrides `itemType` so MEDICINE stays MEDICINE |
+| 1 | "Register new patient" link when no patients found in billing | `billing/new/page.tsx` — button redirects to `/patients/new?returnTo=/billing/new`; useEffect reads `patientId` query param on return and auto-fetches + auto-selects the newly registered patient; visible to ADMIN and RECEPTION only |
+| 4b | Auto-create CONSULTATION IPD charge on admission if doctor has `ipdConsultationFee` set | `ipd.routes.js` — inside the admission creation `$transaction`, after bed allocation, queries doctor with `user` join; if `ipdConsultationFee > 0`, creates an `IPDCharge` of type `CONSULTATION` with `itemName = "Consultation — Dr. <name>"` and sets `notes = 'Initial consultation fee on admission'` |
+| 3 | Nurse sees Emergency Visit Details on IPD overview tab | Backend: updated `GET /admissions/:id` include to add `prescriptionUrl` to `linkedEmergencyBill` select. Frontend `ipd/[admissionId]/page.tsx`: amber left-bordered card shows admitting doctor, admission reason, emergency notes, and a "View Prescription" link (visible only if `isEmergencyCase && linkedEmergencyBill` and user is nurse/nurse superintendent) |
+| 5 | Nurse Add Charge modal redesign — type-based UI, price visibility rules, ₹0 highlighting, Set Price flow | `ipd/[admissionId]/page.tsx` — see detailed breakdown below |
+
+**Issue 5 detailed breakdown:**
+
+*Charge list UI (charges table):*
+- ₹0 charges: amber-tinted row (`bg-amber-50/50`), `"Price pending"` badge, amber price text
+- "Set Price" button on ₹0 rows — visible only to ADMIN and CASHIER on active admissions
+- "Set Price" opens a modal with `newUnitPrice` + `reason` fields; submits `POST /admissions/:id/modify-requests` with `requestType: 'PRICE_UPDATE'` (IPDModifyRequest flow — requires admin approval to take effect)
+- Delete button: unchanged (ADMIN only)
+
+*Add Charge modal — type-specific input logic:*
+- `CONSULTATION`: Doctor dropdown (all IPD doctors with fee in label) + special "Special Doctor (visiting/external)" option. Selecting a doctor auto-fills `itemName` and `unitPrice`. Special doctor shows free-text name input. Price field hidden for nurse/nurse superintendent for all types EXCEPT Special Doctor CONSULTATION (where nurse enters name only; price stays hidden)
+- `CONSUMABLE`: searchable datalist of consumables catalog
+- `MEDICINE`: searchable datalist of medicines catalog
+- `PROCEDURE` / `OTHER`: plain free-text description field
+- Quantity always shown; price field hidden for nurses on non-special consultation types
+
+*Set Price modal:*
+- Component: `showSetPriceModal` + `setPriceCharge` + `setPriceForm` states
+- Submits `POST /admissions/:id/modify-requests` → `{ requestType: 'PRICE_UPDATE', chargeId, newUnitPrice, reason }`
+- Toast: "Price update request submitted — pending admin approval"
+
+#### Bug fixes (2026-05-23)
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| "View Prescription" link → 404 at `localhost:3000/uploads/...` | (1) Backend had no static file server for uploads; (2) `prescriptionUrl` stored as `/uploads/prescriptions/...` relative path, used directly as `href` so browser resolved it against frontend origin | (1) `server.js`: added `app.use('/uploads', express.static(path.join(__dirname, '../../uploads')))` pointing inside Docker container; (2) `ipd/[admissionId]/page.tsx`: href now prepends backend base URL derived from `NEXT_PUBLIC_API_URL` by stripping `/api/v1` suffix: `.replace(/\/api\/v1\/?$/, '')` |
+| Docker uploads ephemeral — prescription files lost on container restart | No Docker volume for uploads directory | `docker-compose.yml`: added `- ./uploads:/uploads` bind-mount to backend service; files now persist on host at `./uploads/` |
+| "Register new patient" inline modal → "Registration failed" toast | Backend returns 403 for RECEPTION role attempting `POST /patients`; also inline modal lacked DPDPA consent checkbox and full validation | Replaced inline modal with redirect flow: button now calls `router.push('/patients/new?returnTo=/billing/new')`; the existing `/patients/new` page already supports `returnTo` and redirects to `${returnTo}?patientId=${id}` on success; billing page useEffect reads `patientId` from URL and auto-selects patient |
+| TRANSFERRED emergency bill shows "Paid" badge + "Due: ₹X" simultaneously | When IPD admission is linked to an emergency bill, `ipd.routes.js` correctly sets `paymentStatus = 'TRANSFERRED'`; but billing list had no handler for `TRANSFERRED` — it fell through the `else` branch showing "Paid" text with wrong green styling | `billing/page.tsx`: added `TRANSFERRED: 'bg-blue-100 text-blue-700'` to `STATUS_BADGE`; extracted `statusLabel()` helper that returns `"To IPD"` for TRANSFERRED; hid "Collect" button for TRANSFERRED bills (`bill.paymentStatus !== 'PAID' && bill.paymentStatus !== 'TRANSFERRED'`) |
+
+#### Open item from UAT 6 (not yet fixed)
+
+| ID | Issue | Status |
+|---|---|---|
+| — | PROCEDURE type in billing/new shows catalogue dropdown even when catalogue is empty — should degrade to free text | Decision pending: option A = always free text for PROCEDURE in billing; option B = hide dropdown trigger when `procedures.length === 0` |
+
+---
 
 ### UAT 5 — Issues fixed (all done, committed 2026-05-22)
 | ID | Issue | Fix location |
