@@ -228,11 +228,15 @@ When `POST /admissions/:id/payments` is called:
 
 ## Remaining / Deferred Items
 
-### B4 — Upload paper prescription to S3 (in scope, pending credentials)
-**What:** Nurse/doctor should be able to upload a paper prescription photo during IPD stay.
-**Where:** Backend: `POST /ipd/admissions/:id/prescriptions/upload` (new endpoint needed). Frontend: add upload button in the prescriptions section of the IPD detail page.
-**Pattern:** Follow the existing OPD prescription upload in `hms-backend/src/modules/opd/opd.routes.js` (multer + S3 with `@aws-sdk/client-s3`). AWS credentials go in `.env` as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_BUCKET`.
-**Note:** The OPD prescription upload at `/opd/visits/:id/prescription-upload` stores to `uploads/prescriptions/` locally (needs S3). Reuse that pattern but for IPD admissions.
+### ✅ B4 — Emergency bill prescription upload (done 2026-05-22)
+On the Generate Bill page (`/billing/new`), when bill type = EMERGENCY:
+- A dashed file input appears for PDF/JPG/PNG (max 15 MB), visible in the form
+- After bill is created, file is uploaded via `POST /billing/bills/:id/prescription-upload`
+- File saved to `uploads/prescriptions/bill_rx_<id>_<timestamp>.<ext>`
+- `Bill.prescriptionUrl String?` field added to schema and pushed to DB
+- Success screen shows: upload in-progress, done tick, retry on error, or optional upload button if none selected during form fill
+- Files: `billing.routes.js` (upload endpoint), `billing/new/page.tsx` (UI), `schema.prisma` (field)
+- **Pending — S3 migration:** Currently stores to local disk. When AWS creds available, swap multer storage to `multer-s3` targeting `AWS_S3_BUCKET`. Same upgrade needed for OPD upload too.
 
 ### A5 — Show prescription medicine names inline (partially done)
 **What:** In the IPD overview tab (for nurses and doctors), show prescription medicines as inline badges. This is already partially in the code — prescriptions are fetched on mount and shown in the overview. Verify it's working in UAT.
