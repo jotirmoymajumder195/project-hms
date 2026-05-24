@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-05-23
+> Last updated: 2026-05-24
 > Branch: `joti` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -146,7 +146,7 @@ All endpoints implemented in `hms-backend/src/modules/ipd/ipd.routes.js`:
 | /admissions/:id/bill-summary | GET | ALL |
 | /admissions/:id/charges | POST | ADMIN, NURSE, NURSE_SUP, CASHIER |
 | /admissions/:id/charges/:chargeId | DELETE | ADMIN, DOCTOR, NURSE |
-| /admissions/:id/payments | GET/POST | CASHIER, ADMIN |
+| /admissions/:id/payments | GET/POST | CASHIER, ADMIN, RECEPTION |
 | /admissions/:id/vitals | GET/POST | DOCTOR, NURSE, NURSE_SUP, ADMIN |
 | /admissions/:id/notes | GET/POST | DOCTOR, NURSE, NURSE_SUP, ADMIN |
 | /admissions/:id/prescriptions | GET/POST | DOCTOR, ADMIN |
@@ -254,11 +254,25 @@ When `POST /admissions/:id/payments` is called:
 | "Register new patient" inline modal → "Registration failed" toast | Backend returns 403 for RECEPTION role attempting `POST /patients`; also inline modal lacked DPDPA consent checkbox and full validation | Replaced inline modal with redirect flow: button now calls `router.push('/patients/new?returnTo=/billing/new')`; the existing `/patients/new` page already supports `returnTo` and redirects to `${returnTo}?patientId=${id}` on success; billing page useEffect reads `patientId` from URL and auto-selects patient |
 | TRANSFERRED emergency bill shows "Paid" badge + "Due: ₹X" simultaneously | When IPD admission is linked to an emergency bill, `ipd.routes.js` correctly sets `paymentStatus = 'TRANSFERRED'`; but billing list had no handler for `TRANSFERRED` — it fell through the `else` branch showing "Paid" text with wrong green styling | `billing/page.tsx`: added `TRANSFERRED: 'bg-blue-100 text-blue-700'` to `STATUS_BADGE`; extracted `statusLabel()` helper that returns `"To IPD"` for TRANSFERRED; hid "Collect" button for TRANSFERRED bills (`bill.paymentStatus !== 'PAID' && bill.paymentStatus !== 'TRANSFERRED'`) |
 
-#### Open item from UAT 6 (not yet fixed)
+---
 
-| ID | Issue | Status |
+### UAT 7 — Issues fixed (2026-05-24)
+
+#### UAT 7 Billing Fixes
+
+| ID | Issue | Fix location |
 |---|---|---|
-| — | PROCEDURE type in billing/new shows catalogue dropdown even when catalogue is empty — should degrade to free text | Decision pending: option A = always free text for PROCEDURE in billing; option B = hide dropdown trigger when `procedures.length === 0` |
+| 7-1 | PROCEDURE type in Generate Bill showed a catalogue dropdown ("No procedures found") instead of free text | `billing/new/page.tsx` — removed `proceduresApi` import, `procedures`/`procedureSearch`/`showProcedureDropdown` states, `filteredProcedures`, `addProcedureToItem`, and `proceduresApi.list()` call; removed PROCEDURE from `onFocus` dropdown trigger, ChevronDown button condition, and dropdown JSX; PROCEDURE now behaves as free-text like OTHER/LAB |
+| 7-2 | Emergency bill charges double-counted in IPD billing totals | `ipd.routes.js` GET /admissions/:id/bill-summary + `billing.routes.js` GET /billing/ipd — excluded the linked emergency bill from `linkedBillsTotal` (items already copied as IPDCharges at admission); its payments are still counted in `totalPaid`. Also fixed `billing/page.tsx` expanded IPD card: TRANSFERRED bill now shows "To IPD" badge + "Moved to IPD charges" label instead of "Unpaid"/"Due" |
+
+#### UAT 7 — RECEPTION role expansion
+
+| Change | Files |
+|---|---|
+| RECEPTION can collect payment on OPD/Emergency/IPD bills (was CASHIER+ADMIN only) | `billing.routes.js`: added `ROLES.RECEPTION` to `POST /bills/:id/payment` authorize() + runtime payment guard inside `POST /bills`; `ipd.routes.js`: added `ROLES.RECEPTION` to `POST /admissions/:id/payments`; Frontend: `canCollectPayment` and `canCollect` now include `isReception` in `billing/new/page.tsx`, `billing/page.tsx`, `ipd/[admissionId]/page.tsx`, `emergency/[billId]/page.tsx` |
+| RECEPTION can "Set Price" on ₹0 IPD charges added by nurses | `ipd/[admissionId]/page.tsx`: Set Price button gate changed from `(isAdmin \|\| isCashier)` to `(isAdmin \|\| isCashier \|\| isReception)`; backend `POST /admissions/:id/charges/:chargeId/modify-request` already included RECEPTION — no backend change needed |
+| TRANSFERRED (emergency→IPD) bills now show Collect button in billing list | `billing/page.tsx`: removed `bill.paymentStatus !== 'TRANSFERRED'` exclusion from Collect button guard; after collection status naturally becomes PAID/PARTIALLY_PAID |
+| Double-count regression fix: payment on TRANSFERRED bill changes status to PAID, old code re-included it in totalCharged | `ipd.routes.js` bill-summary + `billing.routes.js` GET /billing/ipd: switched from `paymentStatus === 'TRANSFERRED'` filter to permanent id-based identity using `admission.linkedEmergencyBillId`; emergency bill charges are never double-counted regardless of current payment status |
 
 ---
 
