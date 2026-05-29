@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-05-24
+> Last updated: 2026-05-27
 > Branch: `joti` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -253,6 +253,19 @@ When `POST /admissions/:id/payments` is called:
 | Docker uploads ephemeral — prescription files lost on container restart | No Docker volume for uploads directory | `docker-compose.yml`: added `- ./uploads:/uploads` bind-mount to backend service; files now persist on host at `./uploads/` |
 | "Register new patient" inline modal → "Registration failed" toast | Backend returns 403 for RECEPTION role attempting `POST /patients`; also inline modal lacked DPDPA consent checkbox and full validation | Replaced inline modal with redirect flow: button now calls `router.push('/patients/new?returnTo=/billing/new')`; the existing `/patients/new` page already supports `returnTo` and redirects to `${returnTo}?patientId=${id}` on success; billing page useEffect reads `patientId` from URL and auto-selects patient |
 | TRANSFERRED emergency bill shows "Paid" badge + "Due: ₹X" simultaneously | When IPD admission is linked to an emergency bill, `ipd.routes.js` correctly sets `paymentStatus = 'TRANSFERRED'`; but billing list had no handler for `TRANSFERRED` — it fell through the `else` branch showing "Paid" text with wrong green styling | `billing/page.tsx`: added `TRANSFERRED: 'bg-blue-100 text-blue-700'` to `STATUS_BADGE`; extracted `statusLabel()` helper that returns `"To IPD"` for TRANSFERRED; hid "Collect" button for TRANSFERRED bills (`bill.paymentStatus !== 'PAID' && bill.paymentStatus !== 'TRANSFERRED'`) |
+
+---
+
+### UAT 8 — Issues fixed (2026-05-27)
+
+#### UAT 8 — Add Charge, Doctor Fees, Set Price Approval
+
+| ID | Issue | Fix location |
+|---|---|---|
+| 8-1 | Add Charge CONSULTATION dropdown didn't show the Admitting/Attending doctor when they're OPD/Emergency-typed (not IPD) | `ipd/[admissionId]/page.tsx` — load all doctors into `allDoctors` state alongside IPD-filtered `ipdDoctors`; prepend Admitting + Attending doctor options at top of dropdown if not already in IPD list |
+| 8-2 | Settings page showed all four fee fields regardless of doctor type; wrong fee tagged to wrong type | `settings/page.tsx` — fee fields now conditional: OPD consultation fee + follow-up shown only when `isOPD` checked; Emergency fee only when `isEmergency` checked; IPD fee only when `isIPD` checked; all fields shown if none checked (prevents data loss) |
+| 8-3 | Add Charge fee auto-populate resolved to ₹0 for non-IPD doctors (used only `ipdConsultationFee`) | `ipd/[admissionId]/page.tsx` — fee fallback chain: `ipdConsultationFee \|\| consultationFee \|\| 0`; lookup from `allDoctors` not `ipdDoctors` |
+| 8-4 | Set Price approval flow broken: no admin UI to approve, admin's own Set Price also stuck at PENDING forever | `ipd/[admissionId]/page.tsx` — admin auto-approves immediately via `resolveChargeModification` after `requestChargeModification`; non-admin path unchanged. Added amber "Pending Price Updates" section in billing tab (admin-only) with Approve/Reject buttons. `ipd.routes.js` — added `modifyRequests` include to bill-summary charges query so pending requests come through in the API response |
 
 ---
 
