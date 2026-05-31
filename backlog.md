@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-05-27
+> Last updated: 2026-05-31
 > Branch: `joti` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -253,6 +253,49 @@ When `POST /admissions/:id/payments` is called:
 | Docker uploads ephemeral — prescription files lost on container restart | No Docker volume for uploads directory | `docker-compose.yml`: added `- ./uploads:/uploads` bind-mount to backend service; files now persist on host at `./uploads/` |
 | "Register new patient" inline modal → "Registration failed" toast | Backend returns 403 for RECEPTION role attempting `POST /patients`; also inline modal lacked DPDPA consent checkbox and full validation | Replaced inline modal with redirect flow: button now calls `router.push('/patients/new?returnTo=/billing/new')`; the existing `/patients/new` page already supports `returnTo` and redirects to `${returnTo}?patientId=${id}` on success; billing page useEffect reads `patientId` from URL and auto-selects patient |
 | TRANSFERRED emergency bill shows "Paid" badge + "Due: ₹X" simultaneously | When IPD admission is linked to an emergency bill, `ipd.routes.js` correctly sets `paymentStatus = 'TRANSFERRED'`; but billing list had no handler for `TRANSFERRED` — it fell through the `else` branch showing "Paid" text with wrong green styling | `billing/page.tsx`: added `TRANSFERRED: 'bg-blue-100 text-blue-700'` to `STATUS_BADGE`; extracted `statusLabel()` helper that returns `"To IPD"` for TRANSFERRED; hid "Collect" button for TRANSFERRED bills (`bill.paymentStatus !== 'PAID' && bill.paymentStatus !== 'TRANSFERRED'`) |
+
+---
+
+### Post-UAT 8 — End-to-End Validation Fixes (2026-05-31)
+
+#### Critical bugs found and fixed
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | RECEPTION blocked from collecting payment on Emergency bill detail page | `emergency.routes.js` POST /bills/:id/payment — added `ROLES.RECEPTION` to `authorize()` |
+| 2 | Emergency payment only accepted CASH/UPI/CARD/ONLINE; NETBANKING, INSURANCE, TPA rejected by backend | `emergency.routes.js` — updated `body('method').isIn()` to include all 6 methods |
+| 3 | Insurance/TPA details entered in Emergency payment UI were silently discarded (backend never stored them) | `emergency.routes.js` — added insurance fields to body validation and `prisma.payment.create()` |
+| 4 | Insurance/TPA details entered in IPD Record Payment UI were silently discarded (IPDPayment model missing columns) | `schema.prisma` — added 5 insurance columns to `IPDPayment`; `ipd.routes.js` — added fields to body validation and `iPDPayment.create()` |
+| 5 | Receptionist permission gaps: could not collect payment, add charges, confirm discharge, or see billing tabs on IPD admission page | `ipd/[admissionId]/page.tsx` — `canConfirmDischarge`, `canAddCharge`, tab layout, Record Payment button all now include `isReception`; `billing/page.tsx` auto-collect trigger includes `isReception` |
+| 6 | Add Charge backend blocked RECEPTION (403 error) | `ipd.routes.js` POST /admissions/:id/charges — added `ROLES.RECEPTION` |
+| 7 | "Special Doctor" not visible in Type dropdown of Add Charge modal | `billing/page.tsx`, `patients/[id]/page.tsx`, `ipd/[admissionId]/page.tsx` — added `SPECIAL_DOCTOR` pseudo-type that maps to CONSULTATION + isSpecialDoctor internally |
+
+#### Known gaps (deferred, not blocking)
+
+| # | Gap | Notes |
+|---|---|---|
+| A | Non-admin users who submit a Set Price request cannot track its pending status | Toast says "pending approval" but no UI shows request status to non-admins. Admin sees the amber section. |
+| B | NURSE role cannot submit IPDModifyRequest for zero-price charges they added | Currently NURSE can add charges but not request price changes. Admin/Cashier/Reception can. |
+| C | Emergency bill cannot be collected at bill-creation time | By design — payment is collected at detail page. UX could be clearer. |
+| D | Bill confirmation step (`POST /emergency/bills/:id/confirm`) never explicitly called | Auto-confirmed during first payment collection. Endpoint exists but unused from frontend. |
+
+---
+
+### Post-UAT 8 — Feature additions (2026-05-31)
+
+#### IPD & Receptionist Enhancements
+
+| Feature | Files |
+|---|---|
+| Multiple special visiting doctors per IPD admission (name, specialization, fee) | `schema.prisma` (IPDSpecialVisit model), `ipd.routes.js` (POST/DELETE special-visits), `ipd/[admissionId]/page.tsx`, `(print)/ipd/discharge-summary/[admissionId]/page.tsx` |
+| Special visiting doctors appear in Add Charge CONSULTATION dropdown with fee pre-fill | `ipd/[admissionId]/page.tsx`, `billing/page.tsx`, `patients/[id]/page.tsx` |
+| Add Charge from Billing page IPD rows (no need to navigate to admission page) | `billing/page.tsx` — IPDAdmissionRow with Add Charge modal |
+| Add Charge from Patient profile IPD tab | `patients/[id]/page.tsx` |
+| Special visiting doctor fee shown in Generate Bill IPD doctor section | `billing/new/page.tsx` |
+| Nurse duty assignment: edit and delete existing duties | `nurse-superintendent/page.tsx`, `ipd.routes.js` (PATCH/DELETE /duties/:id), `api.ts` |
+| Cross-midnight nurse duty shifts (shiftStart/shiftEnd datetime fields) | `schema.prisma`, `ipd.routes.js`, `nurse-superintendent/page.tsx` |
+| Insurance/TPA detail fields in IPD Record Payment and Emergency Collect Payment modals | `ipd/[admissionId]/page.tsx`, `emergency/[billId]/page.tsx` |
+| Receptionist = Cashier permissions across all billing, IPD, patient pages | Multiple frontend files + backend route auth |
 
 ---
 
