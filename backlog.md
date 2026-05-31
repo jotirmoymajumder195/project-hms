@@ -270,14 +270,21 @@ When `POST /admissions/:id/payments` is called:
 | 6 | Add Charge backend blocked RECEPTION (403 error) | `ipd.routes.js` POST /admissions/:id/charges — added `ROLES.RECEPTION` |
 | 7 | "Special Doctor" not visible in Type dropdown of Add Charge modal | `billing/page.tsx`, `patients/[id]/page.tsx`, `ipd/[admissionId]/page.tsx` — added `SPECIAL_DOCTOR` pseudo-type that maps to CONSULTATION + isSpecialDoctor internally |
 
+#### Additional fixes (same session)
+
+| # | Fix | Files |
+|---|---|---|
+| 8 | Insurance/TPA fields not showing in IPD Partial Payment modal on billing page | `billing/page.tsx` — added insurance state + fields + validation to `IPDPaymentModal` |
+| 9 | Payment modals cut off Collect button when Insurance/TPA fields expand the content | `billing/page.tsx`, `ipd/[admissionId]/page.tsx`, `emergency/[billId]/page.tsx` — added `max-h-[90vh] overflow-y-auto` to all payment modal containers |
+| 10 | Emergency bill payment at creation time blocked (Collect payment now hidden for Emergency) | `billing/new/page.tsx` — removed `billType !== 'EMERGENCY'` exclusion; added `emergencyApi.recordPayment()` call after bill creation |
+| 11 | Emergency bill detail page: "Collect payment" visible without reviewing bill first | `emergency/[billId]/page.tsx` — gated `canCollect` on `bill.confirmedAt`; added "Review & Confirm Bill" button that calls `emergencyApi.confirmBill()` |
+
 #### Known gaps (deferred, not blocking)
 
 | # | Gap | Notes |
 |---|---|---|
 | A | Non-admin users who submit a Set Price request cannot track its pending status | Toast says "pending approval" but no UI shows request status to non-admins. Admin sees the amber section. |
 | B | NURSE role cannot submit IPDModifyRequest for zero-price charges they added | Currently NURSE can add charges but not request price changes. Admin/Cashier/Reception can. |
-| C | Emergency bill cannot be collected at bill-creation time | By design — payment is collected at detail page. UX could be clearer. |
-| D | Bill confirmation step (`POST /emergency/bills/:id/confirm`) never explicitly called | Auto-confirmed during first payment collection. Endpoint exists but unused from frontend. |
 
 ---
 
