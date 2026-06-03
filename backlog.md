@@ -1,7 +1,7 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-05-31
-> Branch: `joti` (all active work here; `master` = last stable deploy)
+> Last updated: 2026-06-04
+> Branch: `Jotirmoy` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
 ---
@@ -26,7 +26,7 @@ Restart backend after any schema push or route file changes:
 2. Use `prisma.*.findFirst({ where: { id, tenantId } })` not `findUnique` for tenant-scoped lookups.
 3. Never commit or push without explicit user instruction.
 4. `api.ts` is the single source of truth for frontend API calls — add all new endpoints there.
-5. The `useAuth()` hook returns `{ isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent }`.
+5. The `useAuth()` hook returns `{ isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent, isDutyManager }`.
 
 ---
 
@@ -68,6 +68,10 @@ hms-frontend/src/
   app/
     billing/        page.tsx, new/page.tsx, invoice/[id]/page.tsx
     dashboard/      page.tsx
+    duty-manager/
+      layout.tsx                 ← DashboardLayout wrapper (prevents sidebar disappear)
+      page.tsx                   ← Doctor + Nurse duty tabs (ADMIN/DUTY_MANAGER/NURSE_SUP)
+    inventory/      page.tsx     ← Medicines Catalogue tab (admin + pharmacist)
     ipd/
       page.tsx                   ← IPD list
       [admissionId]/page.tsx     ← IPD detail (largest page, ~1100 lines)
@@ -78,12 +82,15 @@ hms-frontend/src/
     patients/       page.tsx, [id]/page.tsx, new/page.tsx
     settings/       page.tsx
     ...
-  components/layout/
-    AppLayout.tsx   ← route guard + layout wrapper
-    Sidebar.tsx     ← nav items with role filtering
+  components/
+    layout/
+      AppLayout.tsx   ← route guard + layout wrapper
+      Sidebar.tsx     ← nav items with role filtering
+    ui/
+      MedicineAutocomplete.tsx   ← reusable medicine search with catalogue + "Other" fallback
   lib/
-    api.ts          ← ALL api calls (billingApi, ipdApi, patientApi, etc.)
-    auth-context.tsx ← useAuth() hook
+    api.ts          ← ALL api calls (billingApi, ipdApi, patientApi, medicinesApi, etc.)
+    auth-context.tsx ← useAuth() hook (includes isDutyManager)
 ```
 
 ---
@@ -96,8 +103,8 @@ Full tenant isolation on all 38 Prisma models. employeeId login. CASHIER, OPD_NU
 ### ✅ Phase 1 — Emergency Module (deployed to joti)
 Emergency bill creation, modification workflow, admission-from-emergency. CASHIER role fully built.
 
-### ✅ Phase 2 — IPD Module (joti branch, NOT yet in master)
-Full IPD module built and UAT tested through 5 rounds. See detailed status below.
+### ✅ Phase 2 — IPD Module (Jotirmoy branch, NOT yet in master)
+Full IPD module built and UAT tested through 8 rounds. See detailed status below.
 
 ### ⏳ Phase 3 — Docker & CI/CD (not started)
 Needs: Dockerfile (backend + frontend), GitHub Actions CI, production deploy scripts.
@@ -132,7 +139,7 @@ All endpoints implemented in `hms-backend/src/modules/ipd/ipd.routes.js`:
 
 | Endpoint | Method | Roles |
 |---|---|---|
-| /wards | GET | ADMIN, RECEPTION, DOCTOR, NURSE, NURSE_SUP |
+| /wards | GET | ADMIN, RECEPTION, DOCTOR, NURSE, NURSE_SUP, DUTY_MANAGER (returns activePatientsCount per ward) |
 | /wards/:id/beds | GET | ADMIN, RECEPTION, DOCTOR, NURSE, NURSE_SUP |
 | /beds | POST | ADMIN, SUPER_ADMIN |
 | /admissions | POST | ADMIN, RECEPTION, DOCTOR |
@@ -353,6 +360,86 @@ When `POST /admissions/:id/payments` is called:
 
 ---
 
+---
+
+### Security & Production Readiness (2026-06-03)
+
+| # | Fix | Files |
+|---|---|---|
+| S1 | RBAC gaps — missing role checks on several routes | `ipd.routes.js`, `billing.routes.js`, `emergency.routes.js` — audited and tightened `authorize()` calls |
+| S2 | JWT cross-tenant vulnerability — token from one tenant was usable on another tenant's endpoints | `middleware/auth.js` — added tenantId claim check against DB on each request |
+| S3 | Console.log noise in production — debug logs leaked patient data | Multiple backend route files — removed all `console.log` debug statements |
+| S4 | Tenant auto-resolved from environment variable — removed manual login field | `auth.routes.js` + login page — `TENANT_ID` env var used on backend; no longer required in login form |
+
+---
+
+### Duty Management Consolidation (2026-06-04)
+
+Unified the duty management experience into a single `/duty-manager` route accessible to ADMIN, DUTY_MANAGER, and NURSE_SUPERINTENDENT.
+
+#### What changed
+
+| Change | Files |
+|---|---|
+| Created `duty-manager/layout.tsx` — without this the sidebar disappeared on navigation | `hms-frontend/src/app/duty-manager/layout.tsx` (new) |
+| Sidebar: merged two separate nav entries (nurse-superintendent + duty-manager) into one entry at `/duty-manager` | `Sidebar.tsx` — single entry with roles `[NURSE_SUPERINTENDENT, ADMIN, SUPER_ADMIN, DUTY_MANAGER]` |
+| Page title: "Nurse Superintendent" → "Duty Management" | `duty-manager/page.tsx` |
+| NURSE_SUPERINTENDENT sees only Nurse Duty tab; Doctor Duty tab hidden | `duty-manager/page.tsx` — `canManageDoctorDuty = !isNurseSuperintendent` |
+| IPD Doctors tab added (was missing from admin view) | `duty-manager/page.tsx` — Doctor Duty tab shows ward cards with assigned doctors |
+| Nurse Duty layout changed from department-grouped table to card grid (matches Doctor Duty style) | `duty-manager/page.tsx` — each department card shows nurse entries with shift badge + time + Edit/× actions + "Assign Nurse" dashed button |
+| Pre-selected department when clicking "Assign Nurse" from a card — department locked in modal | `duty-manager/page.tsx` — `preselectedDeptId` state; AssignNurseModal shows read-only display when set |
+| Fixed duplicate `GET /wards` routes — first route (line 110) blocked DUTY_MANAGER with 403; second route (line 1668) was never reached | `ipd.routes.js` — merged `activePatientsCount` into first route, added `ROLES.DUTY_MANAGER`, removed duplicate; frontend updated to use `wardRes.data.data` |
+
+#### Access matrix (Duty Management page)
+
+| Role | Doctor Duty tab | Nurse Duty tab |
+|---|---|---|
+| ADMIN / SUPER_ADMIN | ✅ view + assign + delete | ✅ view + assign + edit + delete |
+| DUTY_MANAGER | ✅ view + assign + delete | ✅ view + assign + edit + delete |
+| NURSE_SUPERINTENDENT | ❌ hidden | ✅ view + assign + edit + delete |
+
+---
+
+### Inventory — Medicines Catalogue (2026-06-04)
+
+Moved the Medicines Catalogue from Settings → Emergency (admin-only quick-link) into its own tab on the Inventory page, accessible to both ADMIN and PHARMACIST roles.
+
+| Change | Files |
+|---|---|
+| Inventory page rewritten from "Coming soon" placeholder to a tabbed page | `hms-frontend/src/app/inventory/page.tsx` |
+| Medicines Catalogue tab: search, add, edit, toggle active/inactive | `inventory/page.tsx` — full inline management via `medicinesApi` |
+| Removed Medicines Catalogue card from Settings → Emergency tab | `hms-frontend/src/app/settings/page.tsx` |
+
+---
+
+### Medicine Autocomplete — All Billing & Charge Pages (2026-06-04)
+
+All pages that accept a MEDICINE item/charge type now use a reusable autocomplete component with catalogue search and "Other" fallback for custom medicines.
+
+#### New component
+
+**`hms-frontend/src/components/ui/MedicineAutocomplete.tsx`**
+- Props: `{ value, onChange(name, price|null), placeholder?, disabled?, className? }`
+- Three modes:
+  - **idle**: search input with debounced API call (280ms), dropdown with results + "Other" always at bottom
+  - **catalogue**: locked teal chip showing selected name + × to clear
+  - **custom**: free-text input with "Custom" badge + × to return to search
+- Closes on outside click; uses `onMouseDown` + `e.preventDefault()` on dropdown items to prevent blur-before-select
+- Resets to idle when parent clears `value` (e.g. after form submit)
+
+#### Pages updated
+
+| Page | What changed |
+|---|---|
+| `ipd/[admissionId]/page.tsx` | MEDICINE charge type replaced with MedicineAutocomplete; price auto-fills from catalogue except for nurse/nurseSuperintendent roles |
+| `emergency/[billId]/page.tsx` | MEDICINE item rows conditionally render MedicineAutocomplete; other item types keep plain input |
+| `billing/page.tsx` (IPDAdmissionRow) | MEDICINE charge type in quick-add modal uses MedicineAutocomplete |
+| `billing/new/page.tsx` | MEDICINE rows use MedicineAutocomplete; CONSUMABLE keeps existing dropdown unchanged |
+
+No backend changes — `GET /medicines?search=` already supported search queries.
+
+---
+
 ## Remaining / Deferred Items
 
 ### ✅ B4 — Emergency bill prescription upload (done 2026-05-22)
@@ -380,8 +467,8 @@ On the Generate Bill page (`/billing/new`), when bill type = EMERGENCY:
 - Departments (add/edit for nurse duty assignments)
 Currently ward/bed management is only via API (no UI).
 
-### Nurse duty assignment UI
-**What:** Nurse Superintendent needs a UI to assign nurses to departments per shift. Backend endpoints exist at `GET/POST /ipd/duty-assignments` and `GET/POST /ipd/departments`. Need a frontend page at `/nurse-superintendent` or inside settings.
+### ✅ Nurse duty assignment UI (done 2026-06-04)
+Nurse Superintendent (and ADMIN / DUTY_MANAGER) now have a full Duty Management page at `/duty-manager` with card-grid layout for both nurse and doctor duty tabs. Backend endpoints (`GET/POST/PATCH/DELETE /ipd/duties`, `/ipd/nurses`, `/ipd/departments`) were already in place.
 
 ### IPD module not yet in master
 The IPD module schema was pushed to the production DB (`prisma db push --accept-data-loss`) but the code is on the `joti` branch. When ready to deploy: merge `joti` → `master` and restart Docker containers.
@@ -412,7 +499,7 @@ router.use(authenticate)  // attaches req.user, req.tenantId
 authorize(ROLES.ADMIN, ROLES.RECEPTION)  // 403 if role not in list
 
 // Frontend
-const { isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent } = useAuth()
+const { isAdmin, isDoctor, isReception, isCashier, isNurse, isNurseSuperintendent, isDutyManager } = useAuth()
 ```
 
 ### Tenant-scoped Prisma queries (MANDATORY)
@@ -524,4 +611,8 @@ await logAudit({
 | `hms-frontend/src/app/dashboard/page.tsx` | Doctor dashboard (IPD + OPD stats) |
 | `hms-frontend/src/app/patients/[id]/page.tsx` | Patient profile with IPD tab (all admissions) |
 | `hms-frontend/src/lib/api.ts` | All frontend API clients |
-| `hms-frontend/src/lib/auth-context.tsx` | useAuth() hook with all role flags |
+| `hms-frontend/src/lib/auth-context.tsx` | useAuth() hook with all role flags (incl. isDutyManager) |
+| `hms-frontend/src/app/duty-manager/layout.tsx` | Layout wrapper that keeps sidebar alive on this route |
+| `hms-frontend/src/app/duty-manager/page.tsx` | Doctor + Nurse duty management (tabbed, role-branched) |
+| `hms-frontend/src/app/inventory/page.tsx` | Inventory page with Medicines Catalogue tab |
+| `hms-frontend/src/components/ui/MedicineAutocomplete.tsx` | Reusable medicine autocomplete with catalogue + "Other" fallback |
