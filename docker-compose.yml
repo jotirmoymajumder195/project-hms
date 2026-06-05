@@ -43,7 +43,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: npx prisma migrate deploy
+    # db push is used locally — it syncs schema without requiring a clean migration history.
+    # Production uses `prisma migrate deploy` via scripts/deploy.sh on EC2.
+    command: npx prisma db push --accept-data-loss
     restart: "no"
 
   backend:
