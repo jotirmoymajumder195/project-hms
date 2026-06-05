@@ -167,4 +167,4 @@ Test restore quarterly.
 | Verify .gitignore | HIGH | ☐ |
 | HTTPS on production | HIGH | ☐ |
 | AWS Security Groups | HIGH | ☐ |
-| RDS Automated Backups | HIGH | ☐ |
+| RDS Automated Backups | HIGH | ☑ |
