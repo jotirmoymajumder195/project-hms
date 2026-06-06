@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-06-04
+> Last updated: 2026-06-06
 > Branch: `Jotirmoy` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -568,6 +568,128 @@ await logAudit({
 
 ---
 
+---
+
+## Production Deployment & Multi-Tenant Go-Live (2026-06-05 → 06-06)
+
+### Infrastructure (AWS EC2 + Vercel)
+
+| Item | Detail |
+|---|---|
+| Backend | Node/Express on EC2 (`i-03e57b8769126f532`), managed by PM2, at `api.sarvikatech.in` |
+| Frontend | Next.js on Vercel, at `mbs.sarvikatech.in` (main hospital), `citycare.sarvikatech.in` (second tenant), `admin.sarvikatech.in` (super admin panel) |
+| Database | AWS RDS PostgreSQL at `hms-database.cl84c2imuzlr.ap-south-1.rds.amazonaws.com` |
+| Redis | On EC2 localhost:6379, password-protected, used for MFA tokens + login rate limiting |
+| DNS | All subdomains are CNAMEs → Vercel edge; verified propagated as of 2026-06-06 |
+
+### Auth / Token Architecture (production)
+
+The backend sets a `hms_token` **httpOnly cookie** on `api.sarvikatech.in`. Because the frontend is on a different domain (`mbs.sarvikatech.in`), the browser cannot read this cookie in JavaScript. Resolution:
+
+- Backend also returns the JWT as a plain `token` field in the login response body
+- Frontend stores it in `localStorage` as `_hms_token`
+- All API calls read from `localStorage` and attach `Authorization: Bearer <token>`
+- `hms_user` (non-httpOnly) and `hms_tenant` cookies are set by the frontend for middleware/session use
+- Next.js middleware checks `hms_user` cookie (readable) instead of `hms_token` (httpOnly, unreadable cross-domain)
+
+### Multi-Tenant Subdomain Resolution
+
+**Problem:** `NEXT_PUBLIC_TENANT_ID=mbs` is baked into Vercel at build time, so every login — including from `citycare.sarvikatech.in` — was sending `x-tenant-id: mbs`. Citycare users exist in the `citycare` tenant so auth always failed with "invalid credentials".
+
+**Fix (`src/lib/api.ts`):**
+```typescript
+export function resolveTenantId(): string {
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    const sub = host.split('.')[0]
+    // Any subdomain of sarvikatech.in (except infrastructure ones) is a tenant — no hardcoded list needed
+    if (host.endsWith('.sarvikatech.in') && !['api', 'www'].includes(sub)) return sub
+    if ((host === 'localhost' || host === '127.0.0.1') && Cookies.get('hms_tenant')) {
+      return Cookies.get('hms_tenant')!
+    }
+  }
+  return Cookies.get('hms_tenant') || process.env.NEXT_PUBLIC_TENANT_ID || 'mbs'
+}
+```
+Subdomain takes priority on `*.sarvikatech.in` — no hardcoded tenant list. Adding a new tenant requires zero frontend code changes.
+
+### Settings Page — Missing `x-tenant-id` Headers (Fixed 2026-06-06)
+
+14 axios calls in `settings/page.tsx` were missing `'x-tenant-id': getTenantId()` in their headers. These used raw `axios` (not the `api.ts` interceptor which adds the header automatically). Affected tabs:
+
+| Tab | Calls fixed |
+|---|---|
+| Staff & Users | GET users, PATCH user, POST register |
+| Consumables | GET consumables |
+| OPD Chambers | GET chambers, GET schedule, DELETE chamber, DELETE assignment |
+| IPD Config | GET wards, GET departments |
+| Procedures | GET, PATCH toggle, PATCH/POST save |
+
+**Rule going forward:** Any page that uses raw `axios` instead of the shared `api` instance from `api.ts` must manually add both `Authorization` and `x-tenant-id` headers. Better: always use `api` from `api.ts` — it handles both via interceptor.
+
+### Super Admin Platform
+
+| Item | Detail |
+|---|---|
+| Tenant | `svk-platform` (fixed string ID, not UUID) |
+| Login | `admin.sarvikatech.in/admin-login` → dark-themed login, hardcodes `x-tenant-id: svk-platform` |
+| Panel | `/super-admin` — list tenants, toggle modules, activate/deactivate, add hospital, add admin |
+| First user | `SVK-ADMIN` / `SVKAdmin@2026!` (SUPER_ADMIN role, `mustChangePassword: false`) |
+| Code | `hms-frontend/src/app/admin-login/page.tsx`, `src/app/super-admin/page.tsx`, `src/lib/api.ts` (`superAdminApi`), `hms-backend/src/modules/super-admin/super-admin.routes.js` |
+
+### Tenants in Production DB
+
+| id | name | subdomain | isActive |
+|---|---|---|---|
+| `2060cb00-466a-453c-be4b-75ac8343bcdd` | MBS Hospital | mbs | ✅ |
+| `citycare` | City Care Hospital | citycare | ✅ |
+| `svk-platform` | SVK Digital Innovations | svk-platform | ✅ |
+
+**Note:** MBS tenant has a UUID id (not the string "mbs") — always use the full UUID in any direct DB/Prisma queries targeting MBS users.
+
+### Citycare Admin Credentials
+
+| Field | Value |
+|---|---|
+| Employee ID | `ADMIN-001` |
+| Password | `Citycare@2026!` |
+| mustChangePassword | false (reset directly in DB on 2026-06-06) |
+
+Second admin: `MBSADM2026720` — password unknown (was set with old temp password before code was updated). Reset via admin panel if needed.
+
+### Rate Limiter Behaviour
+
+- **Per-user Redis limiter:** Key pattern `login_attempts:{tenantId}:{employeeId}`, max 5 attempts, 15-min block. Stored in Redis. Clear with: `redis-cli -a <password> DEL "login_attempts:citycare:ADMIN-001"`
+- **Per-IP Express limiter:** `authLimiter` in `server.js`, uses in-memory store (not Redis). Clears on PM2 restart: `pm2 restart hms-backend`
+- **To clear all blocks immediately:** `pm2 restart hms-backend` on EC2 via AWS SSM
+
+### EC2 Access (AWS SSM)
+
+```bash
+# Get instance ID
+aws ec2 describe-instances --filters "Name=tag:Name,Values=*hms*" --query "Reservations[0].Instances[0].InstanceId"
+# Instance: i-03e57b8769126f532
+
+# Run a command
+aws ssm send-command \
+  --instance-ids "i-03e57b8769126f532" \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["your command here"]' \
+  --query "Command.CommandId" --output text
+
+# Get result (wait ~6s first)
+aws ssm get-command-invocation \
+  --command-id "<CMD_ID>" \
+  --instance-id "i-03e57b8769126f532" \
+  --query "StandardOutputContent" --output text
+```
+
+Redis password: `c75e8121b7c06dcf9206fc1d7bbf271b759f259233d48a2b`
+DB password: `cb9802095090bce05f5cdb5958d578a1b89e938d14bb97760d71d7ba41aa8fac`
+DB host: `hms-database.cl84c2imuzlr.ap-south-1.rds.amazonaws.com`
+
+---
+
 ## Code Review Debt (original items from 2026-05-09 review)
 
 ### Critical (unresolved)
@@ -616,3 +738,186 @@ await logAudit({
 | `hms-frontend/src/app/duty-manager/page.tsx` | Doctor + Nurse duty management (tabbed, role-branched) |
 | `hms-frontend/src/app/inventory/page.tsx` | Inventory page with Medicines Catalogue tab |
 | `hms-frontend/src/components/ui/MedicineAutocomplete.tsx` | Reusable medicine autocomplete with catalogue + "Other" fallback |
+
+---
+
+## New Tenant Onboarding Runbook (2026-06-06)
+
+This runbook documents the exact steps to bring a new hospital tenant live on the platform. It also records every production issue we hit when onboarding Citycare so we never repeat them.
+
+### What is already handled automatically (zero code changes needed)
+
+| Concern | How it's handled |
+|---|---|
+| Frontend tenant detection | `resolveTenantId()` in `api.ts` uses `host.endsWith('.sarvikatech.in')` — any new subdomain is detected without touching code |
+| Backend CORS | Wildcard regex `/^https:\/\/[a-z0-9-]+\.sarvikatech\.in$/` — new subdomains are allowed automatically |
+| Helmet CSP | `connectSrc: ["'self'", "https://*.sarvikatech.in"]` — wildcard covers all subdomains |
+| Auth token routing | `x-tenant-id` header resolved from subdomain at request time, not build time |
+| Vercel deployment | Single build serves all tenants — no per-tenant deploy needed |
+
+### Step-by-step: Adding a new tenant
+
+#### 1. DNS — Add subdomain in your DNS provider
+
+Add a CNAME record:
+```
+<hospital-code>.sarvikatech.in  →  cname.vercel-dns.com
+```
+Example: `greenvalley.sarvikatech.in → cname.vercel-dns.com`
+
+#### 2. Vercel — Add the domain to the project
+
+In Vercel dashboard → Project → Settings → Domains → Add `<hospital-code>.sarvikatech.in`.
+Vercel will issue a TLS certificate automatically.
+
+#### 3. Database — Create the tenant record
+
+Connect to RDS from EC2 via SSM:
+
+```bash
+# Start SSM session
+aws ssm send-command \
+  --instance-ids "i-03e57b8769126f532" \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["export HOME=/home/ubuntu && psql postgresql://hms_user:<DB_PASSWORD>@hms-database.cl84c2imuzlr.ap-south-1.rds.amazonaws.com:5432/hms_db -c \"INSERT INTO \\\"Tenant\\\" (id, name, subdomain, \\\"isActive\\\") VALUES ('<hospital-code>', '<Hospital Full Name>', '<hospital-code>', true);\""]' \
+  --query "Command.CommandId" --output text
+```
+
+Or use the Super Admin Panel at `admin.sarvikatech.in/admin-login` → "Add Hospital" button (preferred — no SQL needed).
+
+#### 4. Create the first admin user
+
+**Via Super Admin Panel (recommended):**
+- Login as `SVK-ADMIN` at `admin.sarvikatech.in`
+- Click the new tenant → "Add Admin"
+- Note the generated `employeeId` and temporary password shown on screen
+
+**Via DB directly (fallback):**
+```bash
+# On EC2, generate bcrypt hash first
+node -e "require('bcryptjs').hash('TempPass@2026!', 10).then(h => console.log(h))" --prefix /home/ubuntu/hms-backend
+```
+Then insert user via psql:
+```sql
+INSERT INTO users ("employeeId", name, role, "tenantId", "passwordHash", "mustChangePassword", "isActive", "mfaEnabled")
+VALUES ('ADMIN-001', 'Hospital Admin', 'ADMIN', '<hospital-code>', '<bcrypt-hash>', true, true, false);
+```
+
+#### 5. Verify login
+
+1. Go to `<hospital-code>.sarvikatech.in`
+2. Login with `ADMIN-001` / `TempPass@2026!`
+3. Since `mustChangePassword=true` you will be prompted to set a new password
+4. Since `mfaEnabled=false` and role is ADMIN, you will be shown the MFA setup QR screen — scan with Google Authenticator or similar
+5. After MFA setup, you land on the dashboard
+
+#### 6. Verify tenant isolation
+
+- Login as MBS admin on `mbs.sarvikatech.in` first (sets `hms_tenant=mbs` cookie)
+- Without clearing cookies, open `<hospital-code>.sarvikatech.in` in the **same browser**
+- Login should succeed as the new tenant's ADMIN — the stale MBS cookie must NOT override
+- This works because `resolveTenantId()` now checks the subdomain BEFORE the cookie on `*.sarvikatech.in`
+
+---
+
+### Issues we hit onboarding Citycare (and how they're now permanently fixed)
+
+#### Issue 1 — Stale `hms_tenant` cookie overriding subdomain detection
+
+**Symptom:** Citycare admin login returned "invalid credentials". Settings page showed "Failed to load staff list".
+
+**Root cause:** `resolveTenantId()` checked the cookie first. If a user had previously visited `mbs.sarvikatech.in`, the `hms_tenant=mbs` cookie (7-day TTL) caused every subsequent request — even from `citycare.sarvikatech.in` — to send `x-tenant-id: mbs`. The backend looked for citycare's ADMIN-001 in the MBS tenant and found no match.
+
+**Fix (permanent):** Subdomain now takes priority on `*.sarvikatech.in`. Cookie is only consulted as a last resort.
+
+**File:** `hms-frontend/src/lib/api.ts` — `resolveTenantId()`
+
+#### Issue 2 — CORS blocking requests from new subdomain
+
+**Symptom:** Browser console showed CORS error on POST `/api/v1/auth/login` from `citycare.sarvikatech.in`.
+
+**Root cause:** Backend used `FRONTEND_URL` env var (a single string `https://mbs.sarvikatech.in`) as the CORS allowed origin.
+
+**Fix (permanent):** Replaced with wildcard regex: `/^https:\/\/[a-z0-9-]+\.sarvikatech\.in$/`. Any new `*.sarvikatech.in` subdomain is automatically allowed — no env var change needed.
+
+**File:** `hms-backend/src/server.js` — `corsOptions`
+
+#### Issue 3 — PM2 crash due to invalid CSP directive
+
+**Symptom:** After updating `FRONTEND_URL` to a comma-separated list in an earlier attempt to fix CORS, PM2 crashed (502 Bad Gateway). Error: "invalid directive value".
+
+**Root cause:** Helmet's `connectSrc` was receiving `"https://mbs.sarvikatech.in, https://citycare.sarvikatech.in"` as a single string instead of an array.
+
+**Fix (permanent):** `connectSrc: ["'self'", "https://*.sarvikatech.in"]` — wildcard, never needs updating.
+
+**File:** `hms-backend/src/server.js` — `helmetOptions.contentSecurityPolicy`
+
+#### Issue 4 — Wrong DB column name (`password` vs `passwordHash`)
+
+**Symptom:** `UPDATE users SET "password"=...` failed silently (column doesn't exist).
+
+**Root cause:** Prisma schema uses `passwordHash` as the column name, not `password`.
+
+**Fix:** Always use `"passwordHash"` in direct SQL. Verify schema with:
+```sql
+SELECT column_name FROM information_schema.columns WHERE table_name='users' AND table_schema='public';
+```
+
+#### Issue 5 — PM2 restart failing via SSM
+
+**Symptom:** `pm2 restart hms-backend` returned "command not found" via SSM.
+
+**Root cause:** SSM runs without a user HOME, so nvm-managed node paths aren't sourced. PM2 binary path varies by nvm version.
+
+**Fix:** Always use `/usr/bin/pm2` (the system-level symlink) and prepend `export HOME=/home/ubuntu &&`:
+```bash
+export HOME=/home/ubuntu && /usr/bin/pm2 restart hms-backend
+```
+
+#### Issue 6 — Vercel does not auto-deploy on push
+
+**Symptom:** Pushed to `main` but `citycare.sarvikatech.in` still served old code.
+
+**Root cause:** Vercel project is connected to the `hms-frontend` submodule repo, but auto-deploy is not triggered by pushes from the parent repo or by submodule updates.
+
+**Fix:** After any frontend code change, manually redeploy:
+```powershell
+# From Windows terminal (WSL has no Vercel credentials)
+echo y | npx vercel redeploy <DEPLOYMENT_URL> --token <VERCEL_TOKEN>
+```
+Or use Vercel Dashboard → Project → Deployments → "Redeploy".
+
+#### Issue 7 — SSM command quoting failures
+
+**Symptom:** Complex inline shell commands with nested quotes failed to execute correctly via `aws ssm send-command`.
+
+**Fix:** Encode the script as base64 and decode+run on EC2:
+```python
+# Locally: generate the b64 string
+import base64
+script = """your multiline python script"""
+print(base64.b64encode(script.encode()).decode())
+```
+```bash
+# SSM command
+echo '<b64>' | base64 -d | python3
+```
+
+---
+
+### Quick reference: credentials and infrastructure
+
+| Item | Value |
+|---|---|
+| EC2 instance | `i-03e57b8769126f532` (ap-south-1) |
+| DB host | `hms-database.cl84c2imuzlr.ap-south-1.rds.amazonaws.com` |
+| DB name | `hms_db` |
+| DB user | `hms_user` |
+| Redis | EC2 localhost:6379 |
+| PM2 binary | `/usr/bin/pm2` |
+| Backend process name | `hms-backend` |
+| Backend code path | `/home/ubuntu/hms-backend` |
+| Super admin login | `admin.sarvikatech.in/admin-login` |
+| Super admin user | `SVK-ADMIN` |
+
+**Note:** DB password, Redis password, and Vercel token are in `backlog.md` above (search "Redis password"). Do not commit these to git.
