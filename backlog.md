@@ -1,6 +1,6 @@
 # HMS Project — Backlog & Handoff Document
 
-> Last updated: 2026-06-06
+> Last updated: 2026-06-06 (Session 2)
 > Branch: `Jotirmoy` (all active work here; `master` = last stable deploy)
 > Stack: Node.js/Express + Next.js 14 App Router + PostgreSQL/Prisma + Docker Compose
 
@@ -633,9 +633,28 @@ Subdomain takes priority on `*.sarvikatech.in` — no hardcoded tenant list. Add
 |---|---|
 | Tenant | `svk-platform` (fixed string ID, not UUID) |
 | Login | `admin.sarvikatech.in/admin-login` → dark-themed login, hardcodes `x-tenant-id: svk-platform` |
-| Panel | `/super-admin` — list tenants, toggle modules, activate/deactivate, add hospital, add admin |
+| Panel | `/super-admin` — list tenants, toggle modules, activate/deactivate, add hospital, add admin, delete tenant |
 | First user | `SVK-ADMIN` / `SVKAdmin@2026!` (SUPER_ADMIN role, `mustChangePassword: false`) |
 | Code | `hms-frontend/src/app/admin-login/page.tsx`, `src/app/super-admin/page.tsx`, `src/lib/api.ts` (`superAdminApi`), `hms-backend/src/modules/super-admin/super-admin.routes.js` |
+
+#### Super Admin — What it can do (as of 2026-06-06)
+
+| Action | How |
+|---|---|
+| Create hospital tenant | "Add Hospital" button → name + hospital code (subdomain) + module selection → DB row created |
+| Create admin for hospital | Select tenant → "Add Admin" → name + optional employeeId → temp password `Admin@123!` shown once |
+| Toggle modules per tenant | Module toggle grid → Save |
+| Activate / Deactivate tenant | Button in tenant detail header |
+| **Permanently delete tenant** | Red "Delete" button (separated by divider) → password confirmation modal → full cascade delete of all data |
+| Employee ID auto-generation | Uses tenant subdomain as prefix (e.g. `IRIS` for iris, `CITY` for citycare) — no longer hardcoded `MBS` |
+
+#### Tenant Deletion — what gets erased
+
+`DELETE /api/v1/super-admin/tenants/:id` (password-verified) deletes in FK-safe order:
+IPD records → OPD/billing/lab → config tables → doctors → users → patients → tenant row.
+Runs in a single Prisma transaction (60s timeout). The `svk-platform` tenant is protected and cannot be deleted.
+
+After deletion, the UI shows a reminder banner to manually remove the Vercel domain and DNS CNAME.
 
 ### Tenants in Production DB
 
@@ -643,19 +662,22 @@ Subdomain takes priority on `*.sarvikatech.in` — no hardcoded tenant list. Add
 |---|---|---|---|
 | `2060cb00-466a-453c-be4b-75ac8343bcdd` | MBS Hospital | mbs | ✅ |
 | `citycare` | City Care Hospital | citycare | ✅ |
-| `svk-platform` | SVK Digital Innovations | svk-platform | ✅ |
+| `00f860ef-4684-40ab-b462-3906755dc021` | Iris Hospital | iris | ✅ |
+| `svk-platform` | SVK Digital Innovations | admin | ✅ |
 
 **Note:** MBS tenant has a UUID id (not the string "mbs") — always use the full UUID in any direct DB/Prisma queries targeting MBS users.
+**Note:** `svk-platform` tenant's subdomain was changed from `svk-platform` to `admin` so that `admin.sarvikatech.in` resolves correctly via backend subdomain lookup.
 
-### Citycare Admin Credentials
+### Tenant Admin Credentials (current)
 
-| Field | Value |
-|---|---|
-| Employee ID | `ADMIN-001` |
-| Password | `Citycare@2026!` |
-| mustChangePassword | false (reset directly in DB on 2026-06-06) |
+| Tenant | Employee ID | Password | Notes |
+|---|---|---|---|
+| MBS Hospital | `ADMIN-001` | (set by admin) | First tenant |
+| City Care Hospital | `ADMIN-001` | `Citycare@2026!` | `mustChangePassword=false` (reset in DB 2026-06-06) |
+| Iris Hospital | `IRISADM2026001` | `Admin@123!` | First login forces password change + MFA setup |
+| SVK Platform | `SVK-ADMIN` | `SVKAdmin@2026!` | Super admin, MFA required |
 
-Second admin: `MBSADM2026720` — password unknown (was set with old temp password before code was updated). Reset via admin panel if needed.
+Second MBS admin: `MBSADM2026720` — password unknown. Reset via admin panel if needed.
 
 ### Rate Limiter Behaviour
 
@@ -687,6 +709,68 @@ aws ssm get-command-invocation \
 Redis password: `c75e8121b7c06dcf9206fc1d7bbf271b759f259233d48a2b`
 DB password: `cb9802095090bce05f5cdb5958d578a1b89e938d14bb97760d71d7ba41aa8fac`
 DB host: `hms-database.cl84c2imuzlr.ap-south-1.rds.amazonaws.com`
+
+---
+
+## Production Fixes & Feature Additions — Session 2 (2026-06-06)
+
+### Auth / Login Flow Fixes
+
+| # | Fix | Root cause | Files |
+|---|---|---|---|
+| F1 | `force-change-password` was blocked with 403 "MFA setup required" | EC2's `auth.js` `mfaSetupAllowedPaths` was missing `/api/v1/auth/force-change-password` — local repo had it, EC2 didn't | Patched live on EC2 via SSM `sed`; local `middleware/auth.js` was already correct |
+| F2 | New admin login flow: mustChangePassword + mfaSetupRequired triggered in wrong order | When both flags true, frontend set password screen but never stored `pendingLoginData` for MFA step; after password change it called `logout()` forcing re-login | `login/page.tsx` — store `pendingLoginData` before `mustChangePassword` check; `onSuccess` transitions to MFA setup instead of logout |
+| F3 | Same flow fix for admin-login page | `admin-login/page.tsx` — same sequencing fix applied; after password change `completeMfaLogin()` + redirect to `/super-admin` |
+| F4 | MFA required roles flow order | For ADMIN users: MFA challenge (if already set up) must be checked before mustChangePassword; `admin-login/page.tsx` reordered: MFA challenge → MFA setup → password change |
+
+### Employee ID Generation Fixes
+
+| # | Fix | Root cause | Files |
+|---|---|---|---|
+| E1 | `generateEmployeeId()` in `auth.routes.js` used hardcoded `MBS` prefix | Staff created in any tenant got IDs like `MBSRECP2026611` even if in Citycare | `auth.routes.js` — uses `tenantId.slice(0,4).toUpperCase()` as prefix (was fixed in Session 1, verified) |
+| E2 | `generateAdminEmployeeId()` in `super-admin.routes.js` used hardcoded `MBSADM` prefix | Admins created via Super Admin panel got `MBSADM2026XXX` regardless of tenant | `super-admin.routes.js` — now looks up tenant subdomain and uses that as prefix |
+| E3 | Employee ID placeholder in Add Admin modal showed `MBSADM2026123` for all tenants | Hardcoded string in JSX | `super-admin/page.tsx` — placeholder dynamically derived from `selected.subdomain` |
+
+### Iris Hospital — First Tenant via Super Admin Panel
+
+| # | Item | Detail |
+|---|---|---|
+| I1 | Tenant created entirely through Super Admin panel | No EC2 access needed — DB row written by `POST /super-admin/tenants` |
+| I2 | Admin employee ID wrong | Fields swapped in Add Admin form — Name field got `ADMIN-001`, Employee ID got `Iris@2026!`; fixed via SSM direct DB update to `IRISADM2026001` |
+| I3 | DNS + Vercel configured manually | `iris.sarvikatech.in` CNAME → Vercel; domain added to Vercel project |
+
+### Super Admin — Tenant Deletion Feature
+
+New feature: permanent tenant deletion with password confirmation.
+
+**Backend:** `DELETE /api/v1/super-admin/tenants/:id`
+- Body: `{ password }` — super admin's own password verified via bcrypt before touching DB
+- `svk-platform` tenant blocked from deletion
+- Deletes all data in FK-dependency order within a single Prisma `$transaction` (60s timeout)
+- 50+ `deleteMany` calls covering all schema models (IPD records → OPD/billing → config → doctors → users → patients → tenant)
+- Audit logged after successful deletion
+
+**Frontend:** `super-admin/page.tsx`
+- Red "Delete" button separated from Deactivate by a visual divider (prevents misclick)
+- Deactivate button color changed amber (was red) to visually distinguish from permanent delete
+- Modal: red-themed, lists all data categories that will be erased, password field with show/hide toggle
+- "Delete Everything" button disabled until password is typed
+- Post-deletion: red banner with checklist to remove Vercel domain + DNS CNAME manually
+
+**API client:** `superAdminApi.deleteTenant(tenantId, password)` in `api.ts`
+
+### New Tenant Onboarding — Self-Serve Process (final state)
+
+As of 2026-06-06, a new hospital can be onboarded entirely through the Super Admin panel with only 2 manual steps:
+
+1. **DNS** — Add `newhospital.sarvikatech.in` CNAME → `cname.vercel-dns.com` in DNS panel
+2. **Vercel** — Add domain in Vercel Project Settings → Domains
+
+Everything else is automated:
+- Super Admin "Add Hospital" → creates tenant DB row with UUID, sets modules, `isActive: true`
+- Super Admin "Add Admin" → creates ADMIN user, generates `{PREFIX}ADM{YEAR}{NNN}` employee ID using tenant subdomain prefix, sets `mustChangePassword: true`, `mfaEnabled: false`, temp password `Admin@123!`
+- Frontend `resolveTenantId()` auto-detects any `*.sarvikatech.in` subdomain — zero code change
+- First login flow: set password → MFA setup QR → dashboard (single uninterrupted flow, no re-login required)
 
 ---
 
